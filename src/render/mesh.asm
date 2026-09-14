@@ -1,7 +1,7 @@
 ; ============================================================
 ; src/render/mesh.asm
-; GPU mesh abstraction — cube + procedural UV sphere
-; Vertex layout: pos(3) + color(3) + normal(3) = 36 bytes
+; Mesh abstraction: cube, sphere, pyramid
+; Vertex layout: pos(3) + color(3) + normal(3) + uv(2) = 44 bytes
 ; ============================================================
 BITS 64
 default rel
@@ -25,42 +25,41 @@ extern LocalFree
 
 section .data
 align 16
-
 pi_const:        dd 3.14159265358979
 two_pi_const:    dd 6.28318530717959
 
-; ---- Unit cube: 24 vertices, pos + color + normal ----
+; ---- Unit cube: 24 vertices, pos + color + normal + uv ----
 cube_vertices:
-    ; -Z (red)
-    dd -0.5, -0.5, -0.5,   1.0, 0.0, 0.0,    0.0, 0.0, -1.0
-    dd  0.5, -0.5, -0.5,   1.0, 0.0, 0.0,    0.0, 0.0, -1.0
-    dd  0.5,  0.5, -0.5,   1.0, 0.0, 0.0,    0.0, 0.0, -1.0
-    dd -0.5,  0.5, -0.5,   1.0, 0.0, 0.0,    0.0, 0.0, -1.0
+    ; -Z (red) uv per face
+    dd -0.5, -0.5, -0.5,   1.0, 0.0, 0.0,    0.0, 0.0, -1.0,   0.0, 1.0
+    dd  0.5, -0.5, -0.5,   1.0, 0.0, 0.0,    0.0, 0.0, -1.0,   1.0, 1.0
+    dd  0.5,  0.5, -0.5,   1.0, 0.0, 0.0,    0.0, 0.0, -1.0,   1.0, 0.0
+    dd -0.5,  0.5, -0.5,   1.0, 0.0, 0.0,    0.0, 0.0, -1.0,   0.0, 0.0
     ; +Z (green)
-    dd -0.5, -0.5,  0.5,   0.0, 1.0, 0.0,    0.0, 0.0, 1.0
-    dd  0.5, -0.5,  0.5,   0.0, 1.0, 0.0,    0.0, 0.0, 1.0
-    dd  0.5,  0.5,  0.5,   0.0, 1.0, 0.0,    0.0, 0.0, 1.0
-    dd -0.5,  0.5,  0.5,   0.0, 1.0, 0.0,    0.0, 0.0, 1.0
+    dd -0.5, -0.5,  0.5,   0.0, 1.0, 0.0,    0.0, 0.0, 1.0,    0.0, 1.0
+    dd  0.5, -0.5,  0.5,   0.0, 1.0, 0.0,    0.0, 0.0, 1.0,    1.0, 1.0
+    dd  0.5,  0.5,  0.5,   0.0, 1.0, 0.0,    0.0, 0.0, 1.0,    1.0, 0.0
+    dd -0.5,  0.5,  0.5,   0.0, 1.0, 0.0,    0.0, 0.0, 1.0,    0.0, 0.0
     ; -Y (blue)
-    dd -0.5, -0.5, -0.5,   0.0, 0.0, 1.0,    0.0, -1.0, 0.0
-    dd  0.5, -0.5, -0.5,   0.0, 0.0, 1.0,    0.0, -1.0, 0.0
-    dd  0.5, -0.5,  0.5,   0.0, 0.0, 1.0,    0.0, -1.0, 0.0
-    dd -0.5, -0.5,  0.5,   0.0, 0.0, 1.0,    0.0, -1.0, 0.0
+    dd -0.5, -0.5, -0.5,   0.0, 0.0, 1.0,    0.0, -1.0, 0.0,   0.0, 1.0
+    dd  0.5, -0.5, -0.5,   0.0, 0.0, 1.0,    0.0, -1.0, 0.0,   1.0, 1.0
+    dd  0.5, -0.5,  0.5,   0.0, 0.0, 1.0,    0.0, -1.0, 0.0,   1.0, 0.0
+    dd -0.5, -0.5,  0.5,   0.0, 0.0, 1.0,    0.0, -1.0, 0.0,   0.0, 0.0
     ; +Y (yellow)
-    dd -0.5,  0.5, -0.5,   1.0, 1.0, 0.0,    0.0, 1.0, 0.0
-    dd  0.5,  0.5, -0.5,   1.0, 1.0, 0.0,    0.0, 1.0, 0.0
-    dd  0.5,  0.5,  0.5,   1.0, 1.0, 0.0,    0.0, 1.0, 0.0
-    dd -0.5,  0.5,  0.5,   1.0, 1.0, 0.0,    0.0, 1.0, 0.0
+    dd -0.5,  0.5, -0.5,   1.0, 1.0, 0.0,    0.0, 1.0, 0.0,    0.0, 1.0
+    dd  0.5,  0.5, -0.5,   1.0, 1.0, 0.0,    0.0, 1.0, 0.0,    1.0, 1.0
+    dd  0.5,  0.5,  0.5,   1.0, 1.0, 0.0,    0.0, 1.0, 0.0,    1.0, 0.0
+    dd -0.5,  0.5,  0.5,   1.0, 1.0, 0.0,    0.0, 1.0, 0.0,    0.0, 0.0
     ; -X (magenta)
-    dd -0.5, -0.5, -0.5,   1.0, 0.0, 1.0,    -1.0, 0.0, 0.0
-    dd -0.5, -0.5,  0.5,   1.0, 0.0, 1.0,    -1.0, 0.0, 0.0
-    dd -0.5,  0.5,  0.5,   1.0, 0.0, 1.0,    -1.0, 0.0, 0.0
-    dd -0.5,  0.5, -0.5,   1.0, 0.0, 1.0,    -1.0, 0.0, 0.0
+    dd -0.5, -0.5, -0.5,   1.0, 0.0, 1.0,    -1.0, 0.0, 0.0,   0.0, 1.0
+    dd -0.5, -0.5,  0.5,   1.0, 0.0, 1.0,    -1.0, 0.0, 0.0,   1.0, 1.0
+    dd -0.5,  0.5,  0.5,   1.0, 0.0, 1.0,    -1.0, 0.0, 0.0,   1.0, 0.0
+    dd -0.5,  0.5, -0.5,   1.0, 0.0, 1.0,    -1.0, 0.0, 0.0,   0.0, 0.0
     ; +X (cyan)
-    dd  0.5, -0.5, -0.5,   0.0, 1.0, 1.0,    1.0, 0.0, 0.0
-    dd  0.5, -0.5,  0.5,   0.0, 1.0, 1.0,    1.0, 0.0, 0.0
-    dd  0.5,  0.5,  0.5,   0.0, 1.0, 1.0,    1.0, 0.0, 0.0
-    dd  0.5,  0.5, -0.5,   0.0, 1.0, 1.0,    1.0, 0.0, 0.0
+    dd  0.5, -0.5, -0.5,   0.0, 1.0, 1.0,    1.0, 0.0, 0.0,    0.0, 1.0
+    dd  0.5, -0.5,  0.5,   0.0, 1.0, 1.0,    1.0, 0.0, 0.0,    1.0, 1.0
+    dd  0.5,  0.5,  0.5,   0.0, 1.0, 1.0,    1.0, 0.0, 0.0,    1.0, 0.0
+    dd  0.5,  0.5, -0.5,   0.0, 1.0, 1.0,    1.0, 0.0, 0.0,    0.0, 0.0
 
 align 16
 cube_indices:
@@ -71,22 +70,61 @@ cube_indices:
     dd 16,17,18, 16,18,19
     dd 20,22,21, 20,23,22
 
+; ---- Unit pyramid: apex at (0,0.5,0), base square at y=-0.5 ----
+; 4 side triangles (12 verts) + 2 base triangles (6 verts) = 18 verts
+; Side normals computed for a 1×1 base / height 1 pyramid:
+;   n = (0, 0.4472, -0.8944)  for -Z face, etc.
+pyramid_vertices:
+    ; ---- side 0: -Z face (base[0] → base[1]) ----
+    ; apex
+    dd  0.0,  0.5,  0.0,   1.0, 0.5, 0.2,    0.0,  0.4472, -0.8944,   0.5, 1.0
+    ; base[0] = (-0.5,-0.5,-0.5)
+    dd -0.5, -0.5, -0.5,   1.0, 0.5, 0.2,    0.0,  0.4472, -0.8944,   0.0, 0.0
+    ; base[1] = ( 0.5,-0.5,-0.5)
+    dd  0.5, -0.5, -0.5,   1.0, 0.5, 0.2,    0.0,  0.4472, -0.8944,   1.0, 0.0
+
+    ; ---- side 1: +X face (base[1] → base[2]) ----
+    dd  0.0,  0.5,  0.0,   0.8, 0.8, 0.2,    0.8944,  0.4472, 0.0,   0.5, 1.0
+    dd  0.5, -0.5, -0.5,   0.8, 0.8, 0.2,    0.8944,  0.4472, 0.0,   0.0, 0.0
+    dd  0.5, -0.5,  0.5,   0.8, 0.8, 0.2,    0.8944,  0.4472, 0.0,   1.0, 0.0
+
+    ; ---- side 2: +Z face (base[2] → base[3]) ----
+    dd  0.0,  0.5,  0.0,   0.2, 0.8, 0.4,    0.0,  0.4472, 0.8944,   0.5, 1.0
+    dd  0.5, -0.5,  0.5,   0.2, 0.8, 0.4,    0.0,  0.4472, 0.8944,   0.0, 0.0
+    dd -0.5, -0.5,  0.5,   0.2, 0.8, 0.4,    0.0,  0.4472, 0.8944,   1.0, 0.0
+
+    ; ---- side 3: -X face (base[3] → base[0]) ----
+    dd  0.0,  0.5,  0.0,   0.4, 0.4, 0.9,   -0.8944, 0.4472, 0.0,   0.5, 1.0
+    dd -0.5, -0.5,  0.5,   0.4, 0.4, 0.9,   -0.8944, 0.4472, 0.0,   0.0, 0.0
+    dd -0.5, -0.5, -0.5,   0.4, 0.4, 0.9,   -0.8944, 0.4472, 0.0,   1.0, 0.0
+
+    ; ---- base triangle A: (base[0], base[2], base[1]) — reversed winding ----
+    dd -0.5, -0.5, -0.5,   0.5, 0.5, 0.5,    0.0, -1.0, 0.0,   0.0, 1.0
+    dd  0.5, -0.5,  0.5,   0.5, 0.5, 0.5,    0.0, -1.0, 0.0,   1.0, 0.0
+    dd  0.5, -0.5, -0.5,   0.5, 0.5, 0.5,    0.0, -1.0, 0.0,   1.0, 1.0
+
+    ; ---- base triangle B: (base[0], base[3], base[2]) — reversed winding ----
+    dd -0.5, -0.5, -0.5,   0.5, 0.5, 0.5,    0.0, -1.0, 0.0,   0.0, 1.0
+    dd -0.5, -0.5,  0.5,   0.5, 0.5, 0.5,    0.0, -1.0, 0.0,   0.0, 0.0
+    dd  0.5, -0.5,  0.5,   0.5, 0.5, 0.5,    0.0, -1.0, 0.0,   1.0, 0.0
+
+align 16
+pyramid_indices:
+    dd 0,1,2, 3,4,5, 6,7,8, 9,10,11, 12,13,14, 15,16,17
+
 section .text
 global mesh_create_cube
 global mesh_create_sphere
+global mesh_create_pyramid
 global mesh_draw
 global mesh_destroy
 
-; ============================================================
-; Internal: mesh_upload_attribs(Mesh* m)
-;   Assumes VAO bound and VBO bound to GL_ARRAY_BUFFER.
 ; ============================================================
 mesh_upload_attribs:
     push rbx
     sub  rsp, 0x30
     mov  rbx, rcx
 
-    ; aPos
     mov  ecx, MESH_ATTR_POS
     mov  edx, 3
     mov  r8d, GL_FLOAT
@@ -97,7 +135,6 @@ mesh_upload_attribs:
     mov  ecx, MESH_ATTR_POS
     call qword [glEnableVertexAttribArray]
 
-    ; aColor
     mov  ecx, MESH_ATTR_COLOR
     mov  edx, 3
     mov  r8d, GL_FLOAT
@@ -108,7 +145,6 @@ mesh_upload_attribs:
     mov  ecx, MESH_ATTR_COLOR
     call qword [glEnableVertexAttribArray]
 
-    ; aNormal
     mov  ecx, MESH_ATTR_NORMAL
     mov  edx, 3
     mov  r8d, GL_FLOAT
@@ -119,17 +155,30 @@ mesh_upload_attribs:
     mov  ecx, MESH_ATTR_NORMAL
     call qword [glEnableVertexAttribArray]
 
+    mov  ecx, MESH_ATTR_UV
+    mov  edx, 2
+    mov  r8d, GL_FLOAT
+    xor  r9d, r9d
+    mov  qword [rsp+0x20], MESH_VERTEX_SIZE
+    mov  qword [rsp+0x28], MESH_ATTR_UV_OFF
+    call qword [glVertexAttribPointer]
+    mov  ecx, MESH_ATTR_UV
+    call qword [glEnableVertexAttribArray]
+
     add  rsp, 0x30
     pop  rbx
     ret
 
 ; ============================================================
-; mesh_create_cube(Mesh* m) → eax
+; mesh_upload_simple(Mesh* m, verts, vert_count, idxs, idx_count)
+;   rcx = m, rdx = verts, r8d = vert_count, r9 = idxs, stack = idx_count
+; ============================================================
+; (inlined into each create function for now)
+
 ; ============================================================
 mesh_create_cube:
     push rbx
     sub  rsp, 0x30
-
     mov  rbx, rcx
 
     pxor xmm0, xmm0
@@ -181,9 +230,61 @@ mesh_create_cube:
     ret
 
 ; ============================================================
-; mesh_create_sphere(Mesh* m, u32 slices, u32 stacks) → eax
-;   rcx = m, edx = slices (longitude), r8d = stacks (latitude)
-;   slices, stacks clamped to [3..64] and [2..64]
+mesh_create_pyramid:
+    push rbx
+    sub  rsp, 0x30
+    mov  rbx, rcx
+
+    pxor xmm0, xmm0
+    movdqu [rbx],    xmm0
+    movdqu [rbx+16], xmm0
+
+    mov  ecx, 1
+    lea  rdx, [rbx + MESH_VAO]
+    call qword [glGenVertexArrays]
+    mov  ecx, [rbx + MESH_VAO]
+    call qword [glBindVertexArray]
+
+    mov  ecx, 1
+    lea  rdx, [rbx + MESH_VBO]
+    call qword [glGenBuffers]
+    mov  ecx, GL_ARRAY_BUFFER
+    mov  edx, [rbx + MESH_VBO]
+    call qword [glBindBuffer]
+
+    mov  ecx, GL_ARRAY_BUFFER
+    mov  edx, 18 * MESH_VERTEX_SIZE
+    lea  r8,  [pyramid_vertices]
+    mov  r9d, GL_STATIC_DRAW
+    call qword [glBufferData]
+
+    mov  rcx, rbx
+    call mesh_upload_attribs
+
+    mov  ecx, 1
+    lea  rdx, [rbx + MESH_EBO]
+    call qword [glGenBuffers]
+    mov  ecx, GL_ELEMENT_ARRAY_BUFFER
+    mov  edx, [rbx + MESH_EBO]
+    call qword [glBindBuffer]
+
+    mov  ecx, GL_ELEMENT_ARRAY_BUFFER
+    mov  edx, 18 * 4
+    lea  r8,  [pyramid_indices]
+    mov  r9d, GL_STATIC_DRAW
+    call qword [glBufferData]
+
+    mov  dword [rbx + MESH_VERT_COUNT],  18
+    mov  dword [rbx + MESH_INDEX_COUNT], 18
+    mov  dword [rbx + MESH_STRIDE],      MESH_VERTEX_SIZE
+
+    mov  eax, 1
+    add  rsp, 0x30
+    pop  rbx
+    ret
+
+; ============================================================
+; mesh_create_sphere(Mesh* m, u32 slices, u32 stacks)
 ; ============================================================
 mesh_create_sphere:
     push rbx
@@ -195,29 +296,8 @@ mesh_create_sphere:
     push r15
     sub  rsp, 0x100
 
-    ; Stack layout:
-    ;   +0x00..0x1F : shadow space (for calls)
-    ;   +0x20..0x2F : call stack args
-    ;   +0x30+      : locals
-    ;
-    ; locals:
-    ;   [rsp+0x30] : m         (qword)
-    ;   [rsp+0x38] : slices    (u32)
-    ;   [rsp+0x3C] : stacks    (u32)
-    ;   [rsp+0x40] : vert_count(u32)
-    ;   [rsp+0x44] : idx_count (u32)
-    ;   [rsp+0x48] : vert_buf  (qword)
-    ;   [rsp+0x50] : idx_buf   (qword)
-    ;   [rsp+0x58] : theta     (f32)
-    ;   [rsp+0x5C] : cos_theta (f32)
-    ;   [rsp+0x60] : sin_theta (f32)
-    ;   [rsp+0x64] : phi       (f32)
-    ;   [rsp+0x68] : cos_phi   (f32)
-    ;   [rsp+0x6C] : sin_phi   (f32)
-
     mov  [rsp+0x30], rcx
 
-    ; clamp slices: [3, 64]
     cmp  edx, 3
     jae  .s_ge3
     mov  edx, 3
@@ -228,7 +308,6 @@ mesh_create_sphere:
 .s_le64:
     mov  [rsp+0x38], edx
 
-    ; clamp stacks: [2, 64]
     cmp  r8d, 2
     jae  .st_ge2
     mov  r8d, 2
@@ -239,50 +318,43 @@ mesh_create_sphere:
 .st_le64:
     mov  [rsp+0x3C], r8d
 
-    mov  r12d, [rsp+0x38]          ; slices
-    mov  r13d, [rsp+0x3C]          ; stacks
+    mov  r12d, [rsp+0x38]
+    mov  r13d, [rsp+0x3C]
 
-    ; vert_count = (stacks + 1) * (slices + 1)
     lea  eax, [r13d + 1]
     lea  ecx, [r12d + 1]
     imul eax, ecx
-    mov  [rsp+0x40], eax
+    mov  [rsp+0x40], eax           ; vert count
 
-    ; idx_count = stacks * slices * 6
     mov  eax, r13d
     imul eax, r12d
     imul eax, 6
-    mov  [rsp+0x44], eax
+    mov  [rsp+0x44], eax           ; idx count
 
-    ; --- alloc vertex buffer ---
     mov  edx, [rsp+0x40]
     imul edx, MESH_VERTEX_SIZE
-    xor  ecx, ecx                  ; LMEM_FIXED
+    xor  ecx, ecx
     call LocalAlloc
     test rax, rax
     jz   .fail
     mov  [rsp+0x48], rax
 
-    ; --- alloc index buffer ---
     mov  edx, [rsp+0x44]
-    shl  edx, 2                    ; * 4 bytes
+    shl  edx, 2
     xor  ecx, ecx
     call LocalAlloc
     test rax, rax
     jz   .fail_free_verts
     mov  [rsp+0x50], rax
 
-    ; ========================================================
-    ; Fill vertices
-    ; ========================================================
-    mov  rdi, [rsp+0x48]           ; write head
-    xor  r14d, r14d                ; i = 0
+    ; --- fill vertices ---
+    mov  rdi, [rsp+0x48]
+    xor  r14d, r14d
 
 .vert_outer:
     cmp  r14d, r13d
-    ja   .vert_done                ; i <= stacks
+    ja   .vert_done
 
-    ; theta = pi * i / stacks
     pxor xmm0, xmm0
     cvtsi2ss xmm0, r14d
     pxor xmm1, xmm1
@@ -292,17 +364,16 @@ mesh_create_sphere:
     movss [rsp+0x58], xmm0
 
     fld  dword [rsp+0x58]
-    fsincos                        ; st0=cos, st1=sin
-    fstp dword [rsp+0x5C]          ; cos_theta
-    fstp dword [rsp+0x60]          ; sin_theta
+    fsincos
+    fstp dword [rsp+0x5C]           ; cos_theta
+    fstp dword [rsp+0x60]           ; sin_theta
 
-    xor  r15d, r15d                ; j = 0
+    xor  r15d, r15d
 
 .vert_inner:
     cmp  r15d, r12d
-    ja   .vert_next_outer          ; j <= slices
+    ja   .vert_next_outer
 
-    ; phi = 2*pi * j / slices
     pxor xmm0, xmm0
     cvtsi2ss xmm0, r15d
     pxor xmm1, xmm1
@@ -313,32 +384,43 @@ mesh_create_sphere:
 
     fld  dword [rsp+0x64]
     fsincos
-    fstp dword [rsp+0x68]          ; cos_phi
-    fstp dword [rsp+0x6C]          ; sin_phi
+    fstp dword [rsp+0x68]           ; cos_phi
+    fstp dword [rsp+0x6C]           ; sin_phi
 
-    ; x = sin_theta * cos_phi
     movss xmm0, [rsp+0x60]
-    mulss xmm0, [rsp+0x68]
-    ; y = cos_theta
-    movss xmm1, [rsp+0x5C]
-    ; z = sin_theta * sin_phi
+    mulss xmm0, [rsp+0x68]          ; x = sin_theta*cos_phi
+    movss xmm1, [rsp+0x5C]          ; y = cos_theta
     movss xmm2, [rsp+0x60]
-    mulss xmm2, [rsp+0x6C]
+    mulss xmm2, [rsp+0x6C]          ; z = sin_theta*sin_phi
 
-    ; write position
     movss [rdi+0], xmm0
     movss [rdi+4], xmm1
     movss [rdi+8], xmm2
 
-    ; write color (warm orange: 1.0, 0.55, 0.35)
-    mov  dword [rdi+12], 0x3F800000    ; 1.0
-    mov  dword [rdi+16], 0x3F0CCCCD    ; 0.55
-    mov  dword [rdi+20], 0x3EB33333    ; 0.35
+    ; color (orange-ish base)
+    mov  dword [rdi+12], 0x3F800000
+    mov  dword [rdi+16], 0x3F0CCCCD
+    mov  dword [rdi+20], 0x3EB33333
 
-    ; write normal = position (unit sphere)
+    ; normal = position
     movss [rdi+24], xmm0
     movss [rdi+28], xmm1
     movss [rdi+32], xmm2
+
+    ; uv: u = j/slices, v = i/stacks
+    pxor xmm3, xmm3
+    cvtsi2ss xmm3, r15d
+    pxor xmm4, xmm4
+    cvtsi2ss xmm4, r12d
+    divss xmm3, xmm4
+    movss [rdi+36], xmm3
+
+    pxor xmm5, xmm5
+    cvtsi2ss xmm5, r14d
+    pxor xmm6, xmm6
+    cvtsi2ss xmm6, r13d
+    divss xmm5, xmm6
+    movss [rdi+40], xmm5
 
     add  rdi, MESH_VERTEX_SIZE
     inc  r15d
@@ -350,37 +432,32 @@ mesh_create_sphere:
 
 .vert_done:
 
-    ; ========================================================
-    ; Fill indices
-    ; ========================================================
+    ; --- fill indices ---
     mov  rdi, [rsp+0x50]
-    lea  r10d, [r12d + 1]          ; stride = slices + 1
-    xor  r14d, r14d                ; i = 0
+    lea  r10d, [r12d + 1]
+    xor  r14d, r14d
 
 .idx_outer:
     cmp  r14d, r13d
-    jae  .idx_done                 ; i < stacks
+    jae  .idx_done
 
     xor  r15d, r15d
 
 .idx_inner:
     cmp  r15d, r12d
-    jae  .idx_next                 ; j < slices
+    jae  .idx_next
 
-    ; a = i * stride + j
     mov  eax, r14d
     imul eax, r10d
-    add  eax, r15d                 ; a
-    lea  edx, [rax + r10]          ; b = a + stride
+    add  eax, r15d
+    lea  edx, [rax + r10]
 
-    ; T1: a, a+1, b+1   (CCW from outside)
     mov  [rdi+0], eax
     lea  ecx, [rax + 1]
     mov  [rdi+4], ecx
     lea  ecx, [rdx + 1]
     mov  [rdi+8], ecx
 
-    ; T2: a, b+1, b
     mov  [rdi+12], eax
     lea  ecx, [rdx + 1]
     mov  [rdi+16], ecx
@@ -396,23 +473,19 @@ mesh_create_sphere:
 
 .idx_done:
 
-    ; ========================================================
-    ; Upload to GPU
-    ; ========================================================
+    ; --- upload ---
     mov  rbx, [rsp+0x30]
 
     pxor xmm0, xmm0
     movdqu [rbx],    xmm0
     movdqu [rbx+16], xmm0
 
-    ; VAO
     mov  ecx, 1
     lea  rdx, [rbx + MESH_VAO]
     call qword [glGenVertexArrays]
     mov  ecx, [rbx + MESH_VAO]
     call qword [glBindVertexArray]
 
-    ; VBO
     mov  ecx, 1
     lea  rdx, [rbx + MESH_VBO]
     call qword [glGenBuffers]
@@ -430,7 +503,6 @@ mesh_create_sphere:
     mov  rcx, rbx
     call mesh_upload_attribs
 
-    ; EBO
     mov  ecx, 1
     lea  rdx, [rbx + MESH_EBO]
     call qword [glGenBuffers]
@@ -445,14 +517,12 @@ mesh_create_sphere:
     mov  r9d, GL_STATIC_DRAW
     call qword [glBufferData]
 
-    ; metadata
     mov  eax, [rsp+0x40]
     mov  [rbx + MESH_VERT_COUNT],  eax
     mov  eax, [rsp+0x44]
     mov  [rbx + MESH_INDEX_COUNT], eax
     mov  dword [rbx + MESH_STRIDE], MESH_VERTEX_SIZE
 
-    ; free temp buffers
     mov  rcx, [rsp+0x50]
     call LocalFree
     mov  rcx, [rsp+0x48]
@@ -466,7 +536,6 @@ mesh_create_sphere:
     call LocalFree
 .fail:
     xor  eax, eax
-
 .done:
     add  rsp, 0x100
     pop  r15
@@ -513,7 +582,6 @@ mesh_destroy:
     call qword [glDeleteVertexArrays]
     mov  dword [rbx + MESH_VAO], 0
 .no_vao:
-
     cmp  dword [rbx + MESH_VBO], 0
     je   .no_vbo
     mov  ecx, 1
@@ -521,7 +589,6 @@ mesh_destroy:
     call qword [glDeleteBuffers]
     mov  dword [rbx + MESH_VBO], 0
 .no_vbo:
-
     cmp  dword [rbx + MESH_EBO], 0
     je   .no_ebo
     mov  ecx, 1
@@ -529,7 +596,6 @@ mesh_destroy:
     call qword [glDeleteBuffers]
     mov  dword [rbx + MESH_EBO], 0
 .no_ebo:
-
     mov  dword [rbx + MESH_INDEX_COUNT], 0
     mov  dword [rbx + MESH_VERT_COUNT],  0
 
