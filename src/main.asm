@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/main.asm
-; Cubes + sphere with Blinn-Phong lighting
+; Entity-based scene: cubes + spheres, Blinn-Phong lighting
 ; ============================================================
 BITS 64
 default rel
@@ -11,6 +11,7 @@ default rel
 %include "input.inc"
 %include "shader.inc"
 %include "mesh.inc"
+%include "entity.inc"
 
 ; ---- GL 3.3 pointers ----
 extern glBindVertexArray
@@ -64,6 +65,12 @@ extern mesh_create_sphere
 extern mesh_draw
 extern mesh_destroy
 
+extern entity_init
+extern entity_spawn_cube
+extern entity_spawn_sphere
+extern entity_update_all
+extern entities
+
 ; ---- Win32 ----
 extern GetModuleHandleA
 extern ShowWindow
@@ -83,12 +90,13 @@ global WinMain
 section .data
 align 16
 
-window_title db "3dre - Cubes + Sphere",0
+window_title db "3dre - Entities",0
 rel_vs_path  db "shaders\basic.vert",0
 rel_fs_path  db "shaders\basic.frag",0
 
 u_mvp_name        db "uMVP",0
 u_model_name      db "uModel",0
+u_color_name      db "uColor",0
 u_light_dir_name  db "uLightDir",0
 u_light_col_name  db "uLightColor",0
 u_ambient_name    db "uAmbient",0
@@ -108,28 +116,34 @@ ambient_level    dd 0.25
 spec_color       dd 1.0, 1.0, 1.0
 shininess        dd 64.0
 
-; ---- Cube instances (32 bytes) ----
-;   +0  f32 x, y, z, pad
-;   +16 f32 angle_y, rot_speed, pad, pad
+; ---- Spawn table (32 bytes per entry) ----
+;   +0  u32  type
+;   +4  f32  x
+;   +8  f32  y
+;   +12 f32  z
+;   +16 f32  rot_speed
+;   +20 f32  color_r
+;   +24 f32  color_g
+;   +28 f32  color_b
 align 16
-cube_instances:
-    dd -2.0,  1.5, -1.0,  0.0,    0.0,   0.8,  0.0, 0.0
-    dd  2.0,  1.5, -1.0,  0.0,    0.4,   0.6,  0.0, 0.0
-    dd -3.0, -1.5,  1.0,  0.0,    0.8,   0.7,  0.0, 0.0
-    dd  3.0, -1.5,  1.0,  0.0,    1.2,   0.5,  0.0, 0.0
-    dd  0.0, -2.0,  3.0,  0.0,    1.6,   0.9,  0.0, 0.0
+spawn_list:
+    dd E_TYPE_CUBE,      -3.0,  1.5, -1.0,   0.8,   1.0, 0.3, 0.3
+    dd E_TYPE_CUBE,       3.0,  1.5, -1.0,   0.6,   0.3, 1.0, 0.3
+    dd E_TYPE_CUBE,      -3.0, -1.5,  1.0,   0.7,   0.3, 0.3, 1.0
+    dd E_TYPE_CUBE,       3.0, -1.5,  1.0,   0.5,   1.0, 1.0, 0.3
+    dd E_TYPE_SPHERE,    -4.0,  0.0,  0.0,   0.9,   1.0, 0.85, 0.4
+    dd E_TYPE_SPHERE,     0.0,  2.5,  0.0,   1.2,   0.9, 0.9, 0.95
+    dd E_TYPE_SPHERE,     4.0,  0.0,  0.0,   0.9,   0.9, 0.5, 0.5
+    dd E_TYPE_SPHERE,     0.0, -2.5,  0.0,   1.2,   0.5, 0.7, 1.0
 
-NUM_CUBES    equ 5
-CUBE_SIZE    equ 32
-
-; ---- Sphere instance ----
-align 16
-sphere_pos       dd 0.0, 2.5, 0.0, 0.0
+NUM_SPAWNS equ 8
+SPAWN_SIZE equ 32
 
 align 16
 f_1_0:      dd 1.0
 f_0_01:     dd 0.01
 bg_rgb:     dd 0.12
+default_tint dd 1.0, 1.0, 1.0
 
 ; ============================================================
 section .bss
@@ -280,6 +294,8 @@ WinMain:
     call input_poll_mouse
     movss xmm0, [dt_seconds]
     call camera_update
+    movss xmm0, [dt_seconds]
+    call entity_update_all
     call renderer_draw
     call input_end_frame
     jmp  .loop
@@ -399,8 +415,10 @@ WndProc:
 ; ============================================================
 renderer_init:
     push rbx
-    sub  rsp, 0x20
+    push r12
+    sub  rsp, 0x28
 
+    ; ---- Shader paths + program ----
     lea  rcx, [rel_vs_path]
     lea  rdx, [abs_vs_path]
     mov  r8d, 260
@@ -420,21 +438,53 @@ renderer_init:
 
     lea  rcx, [shader_prog]
     call shader_program_use
-
     call set_light_uniforms
 
 .no_shader:
-    ; cube mesh
+    ; ---- Meshes ----
     lea  rcx, [cube_mesh]
     call mesh_create_cube
 
-    ; sphere mesh — 32 slices, 24 stacks (nice and smooth)
     lea  rcx, [sphere_mesh]
-    mov  edx, 64
-    mov  r8d, 48
+    mov  edx, 32
+    mov  r8d, 24
     call mesh_create_sphere
 
-    ; GL state
+    ; ---- Entities ----
+    call entity_init
+
+    lea  rbx, [spawn_list]
+    mov  r12d, NUM_SPAWNS
+
+.spawn_loop:
+    mov  eax, [rbx + 0]                 ; type
+
+    movss xmm0, [rbx + 4]               ; x
+    movss xmm1, [rbx + 8]               ; y
+    movss xmm2, [rbx + 12]              ; z
+    movss xmm3, [rbx + 16]              ; rot_speed
+    movss xmm4, [rbx + 20]              ; r
+    movss xmm5, [rbx + 24]              ; g
+    movss xmm6, [rbx + 28]              ; b
+
+    cmp  eax, E_TYPE_CUBE
+    je   .spawn_cube
+    cmp  eax, E_TYPE_SPHERE
+    je   .spawn_sphere
+    jmp  .spawn_next
+
+.spawn_cube:
+    call entity_spawn_cube
+    jmp  .spawn_next
+.spawn_sphere:
+    call entity_spawn_sphere
+
+.spawn_next:
+    add  rbx, SPAWN_SIZE
+    dec  r12d
+    jnz  .spawn_loop
+
+    ; ---- GL state ----
     mov  ecx, GL_DEPTH_TEST
     call glEnable
     mov  ecx, GL_CULL_FACE
@@ -444,7 +494,8 @@ renderer_init:
     mov  ecx, GL_CCW
     call glFrontFace
 
-    add  rsp, 0x20
+    add  rsp, 0x28
+    pop  r12
     pop  rbx
     ret
 
@@ -485,14 +536,14 @@ renderer_draw:
     mov  ecx, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
     call glClear
 
-    ; camera position uniform
+    ; camera pos
     call camera_get_pos
     mov  r8, rcx
     lea  rcx, [shader_prog]
     lea  rdx, [u_camera_pos_name]
     call shader_set_vec3
 
-    ; proj, view, pv
+    ; proj / view / pv
     lea  rcx, [mat_proj]
     call camera_get_proj
 
@@ -504,21 +555,23 @@ renderer_draw:
     lea  r8,  [mat_view]
     call mat4_mul
 
-    ; ============================
-    ; draw cubes
-    ; ============================
-    lea  rbx, [cube_instances]
-    mov  r12d, NUM_CUBES
+    ; ---- Iterate entity slots ----
+    lea  rbx, [entities]
+    mov  r12d, MAX_ENTITIES
 
-.cube_loop:
+.entity_loop:
+    cmp  dword [rbx + E_TYPE], E_TYPE_EMPTY
+    je   .entity_next
+
+    ; model = T * R
     lea  rcx, [mat_tmp]
-    movss xmm0, [rbx+0]
-    movss xmm1, [rbx+4]
-    movss xmm2, [rbx+8]
+    movss xmm0, [rbx + E_POS + 0]
+    movss xmm1, [rbx + E_POS + 4]
+    movss xmm2, [rbx + E_POS + 8]
     call mat4_make_translate
 
     lea  rcx, [mat_tmp2]
-    movss xmm0, [rbx+16]
+    movss xmm0, [rbx + E_ROT_Y]
     call mat4_make_rotate_y
 
     lea  rcx, [mat_model]
@@ -526,11 +579,13 @@ renderer_draw:
     lea  r8,  [mat_tmp2]
     call mat4_mul
 
+    ; mvp = pv * model
     lea  rcx, [mat_mvp]
     lea  rdx, [mat_pv]
     lea  r8,  [mat_model]
     call mat4_mul
 
+    ; set uniforms
     lea  rcx, [shader_prog]
     lea  rdx, [u_mvp_name]
     lea  r8,  [mat_mvp]
@@ -541,44 +596,31 @@ renderer_draw:
     lea  r8,  [mat_model]
     call shader_set_mat4
 
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_color_name]
+    lea  r8,  [rbx + E_COLOR]
+    call shader_set_vec3
+
+    ; draw based on type
+    mov  eax, [rbx + E_TYPE]
+    cmp  eax, E_TYPE_CUBE
+    je   .draw_cube
+    cmp  eax, E_TYPE_SPHERE
+    je   .draw_sphere
+    jmp  .entity_next
+
+.draw_cube:
     lea  rcx, [cube_mesh]
     call mesh_draw
-
-    movss xmm0, [dt_seconds]
-    mulss xmm0, [rbx+20]
-    addss xmm0, [rbx+16]
-    movss [rbx+16], xmm0
-
-    add  rbx, CUBE_SIZE
-    dec  r12d
-    jnz  .cube_loop
-
-    ; ============================
-    ; draw sphere
-    ; ============================
-    lea  rcx, [mat_model]
-    movss xmm0, [sphere_pos]
-    movss xmm1, [sphere_pos+4]
-    movss xmm2, [sphere_pos+8]
-    call mat4_make_translate
-
-    lea  rcx, [mat_mvp]
-    lea  rdx, [mat_pv]
-    lea  r8,  [mat_model]
-    call mat4_mul
-
-    lea  rcx, [shader_prog]
-    lea  rdx, [u_mvp_name]
-    lea  r8,  [mat_mvp]
-    call shader_set_mat4
-
-    lea  rcx, [shader_prog]
-    lea  rdx, [u_model_name]
-    lea  r8,  [mat_model]
-    call shader_set_mat4
-
+    jmp  .entity_next
+.draw_sphere:
     lea  rcx, [sphere_mesh]
     call mesh_draw
+
+.entity_next:
+    add  rbx, ENTITY_SIZE
+    dec  r12d
+    jnz  .entity_loop
 
 .present:
     call win32_swap_buffers
