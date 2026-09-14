@@ -1,6 +1,7 @@
 ; ============================================================
 ; src/main.asm
-; Rotating cube + FPS camera + shaders + hot reload
+; Rotating cube(s) + FPS camera + shaders + hot reload
+; Now with mesh abstraction and multiple instances
 ; ============================================================
 BITS 64
 default rel
@@ -10,15 +11,10 @@ default rel
 %include "math.inc"
 %include "input.inc"
 %include "shader.inc"
+%include "mesh.inc"
 
 ; ---- GL 3.3 pointers ----
-extern glGenVertexArrays
 extern glBindVertexArray
-extern glGenBuffers
-extern glBindBuffer
-extern glBufferData
-extern glVertexAttribPointer
-extern glEnableVertexAttribArray
 extern glDrawElements
 
 ; ---- GL 1.1 direct ----
@@ -50,6 +46,7 @@ extern camera_get_proj
 extern camera_update
 
 extern mat4_mul
+extern mat4_make_translate
 extern mat4_make_rotate_y
 
 extern path_join_exe
@@ -59,6 +56,10 @@ extern shader_program_hot_reload
 extern shader_program_use
 extern shader_program_destroy
 extern shader_set_mat4
+
+extern mesh_create_cube
+extern mesh_draw
+extern mesh_destroy
 
 ; ---- Win32 ----
 extern GetModuleHandleA
@@ -79,7 +80,7 @@ global WinMain
 section .data
 align 16
 
-window_title db "3dre - FPS Camera + Hot Reload",0
+window_title db "3dre - Multiple Cubes",0
 rel_vs_path  db "shaders\basic.vert",0
 rel_fs_path  db "shaders\basic.frag",0
 u_mvp_name   db "uMVP",0
@@ -88,53 +89,29 @@ dbg_title       db "3dre Error",0
 dbg_shader_fail db "Shader failed to load.",13,10,13,10
                 db "Check that build/shaders/ contains basic.vert and basic.frag.",0
 
+; ---- Instance list ----
+; Layout (32 bytes each):
+;   +0   f32  x, y, z          (position)
+;   +12  f32  (pad)
+;   +16  f32  angle_y          (current rotation)
+;   +20  f32  rot_speed        (radians per second)
+;   +24  f32  (pad)
+;   +28  f32  (pad)
 align 16
-cube_vertices:
-    ; -Z (red)
-    dd -0.5, -0.5, -0.5,   1.0, 0.0, 0.0
-    dd  0.5, -0.5, -0.5,   1.0, 0.0, 0.0
-    dd  0.5,  0.5, -0.5,   1.0, 0.0, 0.0
-    dd -0.5,  0.5, -0.5,   1.0, 0.0, 0.0
-    ; +Z (green)
-    dd -0.5, -0.5,  0.5,   0.0, 1.0, 0.0
-    dd  0.5, -0.5,  0.5,   0.0, 1.0, 0.0
-    dd  0.5,  0.5,  0.5,   0.0, 1.0, 0.0
-    dd -0.5,  0.5,  0.5,   0.0, 1.0, 0.0
-    ; -Y (blue)
-    dd -0.5, -0.5, -0.5,   0.0, 0.0, 1.0
-    dd  0.5, -0.5, -0.5,   0.0, 0.0, 1.0
-    dd  0.5, -0.5,  0.5,   0.0, 0.0, 1.0
-    dd -0.5, -0.5,  0.5,   0.0, 0.0, 1.0
-    ; +Y (yellow)
-    dd -0.5,  0.5, -0.5,   1.0, 1.0, 0.0
-    dd  0.5,  0.5, -0.5,   1.0, 1.0, 0.0
-    dd  0.5,  0.5,  0.5,   1.0, 1.0, 0.0
-    dd -0.5,  0.5,  0.5,   1.0, 1.0, 0.0
-    ; -X (magenta)
-    dd -0.5, -0.5, -0.5,   1.0, 0.0, 1.0
-    dd -0.5, -0.5,  0.5,   1.0, 0.0, 1.0
-    dd -0.5,  0.5,  0.5,   1.0, 0.0, 1.0
-    dd -0.5,  0.5, -0.5,   1.0, 0.0, 1.0
-    ; +X (cyan)
-    dd  0.5, -0.5, -0.5,   0.0, 1.0, 1.0
-    dd  0.5, -0.5,  0.5,   0.0, 1.0, 1.0
-    dd  0.5,  0.5,  0.5,   0.0, 1.0, 1.0
-    dd  0.5,  0.5, -0.5,   0.0, 1.0, 1.0
+instances:
+    dd  0.0,  0.0, 0.0,  0.0,    0.0,   0.5,  0.0, 0.0
+    dd  2.0,  0.0, 0.0,  0.0,    0.4,   0.7,  0.0, 0.0
+    dd -2.0,  0.0, 0.0,  0.0,    0.8,   0.9,  0.0, 0.0
+    dd  0.0,  2.0, 0.0,  0.0,    1.2,   0.5,  0.0, 0.0
+    dd  0.0, -2.0, 0.0,  0.0,    1.6,   0.7,  0.0, 0.0
 
-align 16
-cube_indices:
-    dd 0,2,1, 0,3,2
-    dd 4,5,6, 4,6,7
-    dd 8,9,10, 8,10,11
-    dd 12,14,13, 12,15,14
-    dd 16,17,18, 16,18,19
-    dd 20,22,21, 20,23,22
+NUM_INSTANCES equ 5
+INSTANCE_SIZE equ 32
 
 align 16
 f_1_0:      dd 1.0
 f_0_01:     dd 0.01
 bg_rgb:     dd 0.15
-rot_speed:  dd 0.8
 
 ; ============================================================
 section .bss
@@ -143,22 +120,20 @@ hInstance       resq 1
 hwnd            resq 1
 msg             resb 48
 
-vao             resd 1
-vbo             resd 1
-ebo             resd 1
-
 abs_vs_path     resb 260
 abs_fs_path     resb 260
 
 shader_prog     resb SP_SIZE
+cube_mesh       resb MESH_SIZE
 
-mat_model       resb 64
-mat_view        resb 64
+; ---- Matrices ----
 mat_proj        resb 64
+mat_view        resb 64
+mat_pv          resb 64
 mat_tmp         resb 64
+mat_tmp2        resb 64
 mat_mvp         resb 64
 
-angle_y         resd 1
 last_tick       resq 1
 dt_seconds      resd 1
 
@@ -194,7 +169,7 @@ WinMain:
     jz   .exit
     mov  [hwnd], rax
 
-    mov  rcx, [hwnd]
+    mov  rcx, rax
     mov  edx, SW_SHOW
     call ShowWindow
     mov  rcx, [hwnd]
@@ -229,7 +204,6 @@ WinMain:
 .shader_ok:
     call GetTickCount64
     mov  [last_tick], rax
-    mov  dword [angle_y], 0
 
 .loop:
     sub  rsp, 0x30
@@ -261,6 +235,8 @@ WinMain:
     jmp  .loop
 
 .exit:
+    lea  rcx, [cube_mesh]
+    call mesh_destroy
     lea  rcx, [shader_prog]
     call shader_program_destroy
     call input_disable_mouse_look
@@ -331,7 +307,7 @@ WndProc:
     ret
 .deactivate:
     call  input_disable_mouse_look
-    add   rsp, 0x28
+    add  rsp, 0x28
     xor   eax, eax
     ret
 
@@ -369,17 +345,11 @@ WndProc:
     ret
 
 ; ============================================================
-; renderer_init
-;   FIX: sub rsp, 0x30 (was 0x20) — glVertexAttribPointer takes
-;   2 stack args at [rsp+0x20] and [rsp+0x28]. With only 0x20
-;   bytes allocated, those two writes were clobbering saved rbx
-;   and the return address.
-; ============================================================
 renderer_init:
     push rbx
-    sub  rsp, 0x30
+    sub  rsp, 0x20
 
-    ; --- Build absolute shader paths ---
+    ; ---- Build absolute shader paths ----
     lea  rcx, [rel_vs_path]
     lea  rdx, [abs_vs_path]
     mov  r8d, 260
@@ -390,7 +360,7 @@ renderer_init:
     mov  r8d, 260
     call path_join_exe
 
-    ; --- Init shader program ---
+    ; ---- Shader program ----
     lea  rcx, [shader_prog]
     lea  rdx, [abs_vs_path]
     lea  r8,  [abs_fs_path]
@@ -402,64 +372,11 @@ renderer_init:
     call shader_program_use
 
 .no_shader:
-    ; --- VAO ---
-    mov  ecx, 1
-    lea  rdx, [vao]
-    call qword [glGenVertexArrays]
-    mov  ecx, [vao]
-    call qword [glBindVertexArray]
+    ; ---- Cube mesh ----
+    lea  rcx, [cube_mesh]
+    call mesh_create_cube
 
-    ; --- VBO ---
-    mov  ecx, 1
-    lea  rdx, [vbo]
-    call qword [glGenBuffers]
-    mov  ecx, GL_ARRAY_BUFFER
-    mov  edx, [vbo]
-    call qword [glBindBuffer]
-
-    mov  ecx, GL_ARRAY_BUFFER
-    mov  edx, 24 * 6 * 4
-    lea  r8,  [cube_vertices]
-    mov  r9d, GL_STATIC_DRAW
-    call qword [glBufferData]
-
-    ; --- aPos (2 stack args at [rsp+0x20] and [rsp+0x28]) ---
-    mov  ecx, 0
-    mov  edx, 3
-    mov  r8d, GL_FLOAT
-    xor  r9d, r9d
-    mov  qword [rsp+0x20], 24
-    mov  qword [rsp+0x28], 0
-    call qword [glVertexAttribPointer]
-    mov  ecx, 0
-    call qword [glEnableVertexAttribArray]
-
-    ; --- aColor (2 stack args at [rsp+0x20] and [rsp+0x28]) ---
-    mov  ecx, 1
-    mov  edx, 3
-    mov  r8d, GL_FLOAT
-    xor  r9d, r9d
-    mov  qword [rsp+0x20], 24
-    mov  qword [rsp+0x28], 12
-    call qword [glVertexAttribPointer]
-    mov  ecx, 1
-    call qword [glEnableVertexAttribArray]
-
-    ; --- EBO ---
-    mov  ecx, 1
-    lea  rdx, [ebo]
-    call qword [glGenBuffers]
-    mov  ecx, GL_ELEMENT_ARRAY_BUFFER
-    mov  edx, [ebo]
-    call qword [glBindBuffer]
-
-    mov  ecx, GL_ELEMENT_ARRAY_BUFFER
-    mov  edx, 36 * 4
-    lea  r8,  [cube_indices]
-    mov  r9d, GL_STATIC_DRAW
-    call qword [glBufferData]
-
-    ; --- GL state ---
+    ; ---- GL state ----
     mov  ecx, GL_DEPTH_TEST
     call glEnable
     mov  ecx, GL_CULL_FACE
@@ -469,14 +386,17 @@ renderer_init:
     mov  ecx, GL_CCW
     call glFrontFace
 
-    add  rsp, 0x30
+    add  rsp, 0x20
     pop  rbx
     ret
 
 ; ============================================================
 renderer_draw:
+    push rbx
+    push r12
     sub  rsp, 0x28
 
+    ; ---- No shader? clear & present ----
     lea  rax, [shader_prog]
     cmp  dword [rax+SP_ID], 0
     jne  .do_draw
@@ -491,11 +411,7 @@ renderer_draw:
     jmp  .present
 
 .do_draw:
-    movss xmm0, [dt_seconds]
-    mulss xmm0, [rot_speed]
-    addss xmm0, [angle_y]
-    movss [angle_y], xmm0
-
+    ; ---- Hot reload check ----
     lea  rcx, [shader_prog]
     call shader_program_hot_reload
     test eax, eax
@@ -504,26 +420,7 @@ renderer_draw:
     call shader_program_use
 .no_reload:
 
-    lea  rcx, [mat_proj]
-    call camera_get_proj
-
-    lea  rcx, [mat_view]
-    call camera_get_view
-
-    lea  rcx, [mat_model]
-    movss xmm0, [angle_y]
-    call mat4_make_rotate_y
-
-    lea  rcx, [mat_tmp]
-    lea  rdx, [mat_view]
-    lea  r8,  [mat_model]
-    call mat4_mul
-
-    lea  rcx, [mat_mvp]
-    lea  rdx, [mat_proj]
-    lea  r8,  [mat_tmp]
-    call mat4_mul
-
+    ; ---- Clear ----
     movss xmm0, [bg_rgb]
     movss xmm1, [bg_rgb]
     movss xmm2, [bg_rgb]
@@ -532,20 +429,71 @@ renderer_draw:
     mov  ecx, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
     call glClear
 
+    ; ---- Proj & View ----
+    lea  rcx, [mat_proj]
+    call camera_get_proj
+
+    lea  rcx, [mat_view]
+    call camera_get_view
+
+    ; ---- PV = Proj * View ----
+    lea  rcx, [mat_pv]
+    lea  rdx, [mat_proj]
+    lea  r8,  [mat_view]
+    call mat4_mul
+
+    ; ---- Iterate instances ----
+    lea  rbx, [instances]
+    mov  r12d, NUM_INSTANCES
+
+.draw_loop:
+    ; mat_tmp = T(pos)
+    lea  rcx, [mat_tmp]
+    movss xmm0, [rbx+0]
+    movss xmm1, [rbx+4]
+    movss xmm2, [rbx+8]
+    call mat4_make_translate
+
+    ; mat_tmp2 = R(angle_y)
+    lea  rcx, [mat_tmp2]
+    movss xmm0, [rbx+16]
+    call mat4_make_rotate_y
+
+    ; mat_mvp = PV * T
+    lea  rcx, [mat_mvp]
+    lea  rdx, [mat_pv]
+    lea  r8,  [mat_tmp]
+    call mat4_mul
+
+    ; mat_mvp = mat_mvp * R     (a == dst — safe)
+    lea  rcx, [mat_mvp]
+    lea  rdx, [mat_mvp]
+    lea  r8,  [mat_tmp2]
+    call mat4_mul
+
+    ; ---- Set uMVP ----
     lea  rcx, [shader_prog]
     lea  rdx, [u_mvp_name]
     lea  r8,  [mat_mvp]
     call shader_set_mat4
 
-    mov  ecx, [vao]
-    call qword [glBindVertexArray]
-    mov  ecx, GL_TRIANGLES
-    mov  edx, 36
-    mov  r8d, GL_UNSIGNED_INT
-    xor  r9d, r9d
-    call qword [glDrawElements]
+    ; ---- Draw ----
+    lea  rcx, [cube_mesh]
+    call mesh_draw
+
+    ; ---- Update angle ----
+    movss xmm0, [dt_seconds]
+    mulss xmm0, [rbx+20]           ; rot_speed
+    addss xmm0, [rbx+16]           ; angle_y += dt * speed
+    movss [rbx+16], xmm0
+
+    add  rbx, INSTANCE_SIZE
+    dec  r12d
+    jnz  .draw_loop
 
 .present:
     call win32_swap_buffers
     add  rsp, 0x28
+    pop  r12
+    pop  rbx
     ret
