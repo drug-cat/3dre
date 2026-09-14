@@ -1,7 +1,6 @@
 ; ============================================================
 ; src/main.asm
-; Rotating cube(s) + FPS camera + shaders + hot reload
-; Now with mesh abstraction and multiple instances
+; Multiple cubes with directional lighting
 ; ============================================================
 BITS 64
 default rel
@@ -56,6 +55,8 @@ extern shader_program_hot_reload
 extern shader_program_use
 extern shader_program_destroy
 extern shader_set_mat4
+extern shader_set_vec3
+extern shader_set_float
 
 extern mesh_create_cube
 extern mesh_draw
@@ -80,23 +81,32 @@ global WinMain
 section .data
 align 16
 
-window_title db "3dre - Multiple Cubes",0
+window_title db "3dre - Lit Cubes",0
 rel_vs_path  db "shaders\basic.vert",0
 rel_fs_path  db "shaders\basic.frag",0
-u_mvp_name   db "uMVP",0
+
+u_mvp_name       db "uMVP",0
+u_model_name     db "uModel",0
+u_light_dir_name db "uLightDir",0
+u_light_col_name db "uLightColor",0
+u_ambient_name   db "uAmbient",0
 
 dbg_title       db "3dre Error",0
 dbg_shader_fail db "Shader failed to load.",13,10,13,10
                 db "Check that build/shaders/ contains basic.vert and basic.frag.",0
 
-; ---- Instance list ----
-; Layout (32 bytes each):
-;   +0   f32  x, y, z          (position)
-;   +12  f32  (pad)
-;   +16  f32  angle_y          (current rotation)
-;   +20  f32  rot_speed        (radians per second)
-;   +24  f32  (pad)
-;   +28  f32  (pad)
+; ---- Light settings ----
+align 16
+light_dir        dd 0.4, 0.7, 0.5           ; direction FROM surface TO light
+light_color      dd 1.0, 1.0, 1.0
+ambient_level    dd 0.25
+
+; ---- Instance list (32 bytes each) ----
+;   +0   f32 x, y, z
+;   +12  pad
+;   +16  f32 angle_y
+;   +20  f32 rot_speed
+;   +24  pad, pad
 align 16
 instances:
     dd  0.0,  0.0, 0.0,  0.0,    0.0,   0.5,  0.0, 0.0
@@ -126,12 +136,12 @@ abs_fs_path     resb 260
 shader_prog     resb SP_SIZE
 cube_mesh       resb MESH_SIZE
 
-; ---- Matrices ----
 mat_proj        resb 64
 mat_view        resb 64
 mat_pv          resb 64
 mat_tmp         resb 64
 mat_tmp2        resb 64
+mat_model       resb 64
 mat_mvp         resb 64
 
 last_tick       resq 1
@@ -187,7 +197,6 @@ WinMain:
     call input_init
     call renderer_init
 
-    ; --- Verify shader loaded ---
     lea  rax, [shader_prog]
     cmp  dword [rax+SP_ID], 0
     jne  .shader_ok
@@ -349,7 +358,7 @@ renderer_init:
     push rbx
     sub  rsp, 0x20
 
-    ; ---- Build absolute shader paths ----
+    ; ---- Shader paths ----
     lea  rcx, [rel_vs_path]
     lea  rdx, [abs_vs_path]
     mov  r8d, 260
@@ -370,6 +379,22 @@ renderer_init:
 
     lea  rcx, [shader_prog]
     call shader_program_use
+
+    ; ---- Set light uniforms once ----
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_light_dir_name]
+    lea  r8,  [light_dir]
+    call shader_set_vec3
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_light_col_name]
+    lea  r8,  [light_color]
+    call shader_set_vec3
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_ambient_name]
+    movss xmm2, [ambient_level]
+    call shader_set_float
 
 .no_shader:
     ; ---- Cube mesh ----
@@ -411,13 +436,30 @@ renderer_draw:
     jmp  .present
 
 .do_draw:
-    ; ---- Hot reload check ----
+    ; ---- Hot reload ----
     lea  rcx, [shader_prog]
     call shader_program_hot_reload
     test eax, eax
     jz   .no_reload
     lea  rcx, [shader_prog]
     call shader_program_use
+
+    ; After reload, re-set light uniforms (they were lost with the old program)
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_light_dir_name]
+    lea  r8,  [light_dir]
+    call shader_set_vec3
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_light_col_name]
+    lea  r8,  [light_color]
+    call shader_set_vec3
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_ambient_name]
+    movss xmm2, [ambient_level]
+    call shader_set_float
+
 .no_reload:
 
     ; ---- Clear ----
@@ -429,14 +471,13 @@ renderer_draw:
     mov  ecx, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
     call glClear
 
-    ; ---- Proj & View ----
+    ; ---- Proj, View, PV = Proj * View ----
     lea  rcx, [mat_proj]
     call camera_get_proj
 
     lea  rcx, [mat_view]
     call camera_get_view
 
-    ; ---- PV = Proj * View ----
     lea  rcx, [mat_pv]
     lea  rdx, [mat_proj]
     lea  r8,  [mat_view]
@@ -459,32 +500,37 @@ renderer_draw:
     movss xmm0, [rbx+16]
     call mat4_make_rotate_y
 
-    ; mat_mvp = PV * T
-    lea  rcx, [mat_mvp]
-    lea  rdx, [mat_pv]
-    lea  r8,  [mat_tmp]
-    call mat4_mul
-
-    ; mat_mvp = mat_mvp * R     (a == dst — safe)
-    lea  rcx, [mat_mvp]
-    lea  rdx, [mat_mvp]
+    ; mat_model = T * R
+    lea  rcx, [mat_model]
+    lea  rdx, [mat_tmp]
     lea  r8,  [mat_tmp2]
     call mat4_mul
 
-    ; ---- Set uMVP ----
+    ; mat_mvp = PV * mat_model
+    lea  rcx, [mat_mvp]
+    lea  rdx, [mat_pv]
+    lea  r8,  [mat_model]
+    call mat4_mul
+
+    ; ---- Set uniforms ----
     lea  rcx, [shader_prog]
     lea  rdx, [u_mvp_name]
     lea  r8,  [mat_mvp]
+    call shader_set_mat4
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_model_name]
+    lea  r8,  [mat_model]
     call shader_set_mat4
 
     ; ---- Draw ----
     lea  rcx, [cube_mesh]
     call mesh_draw
 
-    ; ---- Update angle ----
+    ; ---- Advance rotation ----
     movss xmm0, [dt_seconds]
-    mulss xmm0, [rbx+20]           ; rot_speed
-    addss xmm0, [rbx+16]           ; angle_y += dt * speed
+    mulss xmm0, [rbx+20]
+    addss xmm0, [rbx+16]
     movss [rbx+16], xmm0
 
     add  rbx, INSTANCE_SIZE
