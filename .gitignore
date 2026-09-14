@@ -1,0 +1,26 @@
+# Build artifacts
+build/
+*.o
+*.obj
+*.exe
+*.dll
+*.lib
+*.a
+*.pdb
+*.ilk
+*.exp
+*.map
+
+# Debug / disasm
+disasm.txt
+*.log
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+desktop.ini
