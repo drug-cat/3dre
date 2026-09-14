@@ -1,6 +1,7 @@
 ; ============================================================
 ; src/main.asm
 ; Entity-based scene: cubes + spheres, Blinn-Phong lighting
+; Timing via QueryPerformanceCounter
 ; ============================================================
 BITS 64
 default rel
@@ -71,6 +72,9 @@ extern entity_spawn_sphere
 extern entity_update_all
 extern entities
 
+extern time_init
+extern time_dt
+
 ; ---- Win32 ----
 extern GetModuleHandleA
 extern ShowWindow
@@ -81,7 +85,6 @@ extern DispatchMessageA
 extern DefWindowProcA
 extern PostQuitMessage
 extern DestroyWindow
-extern GetTickCount64
 extern MessageBoxA
 
 global WinMain
@@ -141,7 +144,6 @@ SPAWN_SIZE equ 32
 
 align 16
 f_1_0:      dd 1.0
-f_0_01:     dd 0.01
 bg_rgb:     dd 0.12
 default_tint dd 1.0, 1.0, 1.0
 
@@ -167,7 +169,6 @@ mat_tmp2        resb 64
 mat_model       resb 64
 mat_mvp         resb 64
 
-last_tick       resq 1
 dt_seconds      resd 1
 
 ; ============================================================
@@ -250,6 +251,7 @@ WinMain:
     jz   .exit
 
     call input_init
+    call time_init
     call renderer_init
 
     lea  rax, [shader_prog]
@@ -266,9 +268,6 @@ WinMain:
     jmp  .exit
 
 .shader_ok:
-    call GetTickCount64
-    mov  [last_tick], rax
-
 .loop:
     sub  rsp, 0x30
     lea  rcx, [msg]
@@ -320,20 +319,7 @@ WinMain:
 ; ============================================================
 update_time:
     sub  rsp, 0x28
-    call GetTickCount64
-    mov  rcx, rax
-    sub  rax, [last_tick]
-    mov  [last_tick], rcx
-    test rax, rax
-    jnz  .have_ms
-    mov  rax, 1
-.have_ms:
-    cmp  rax, 33
-    jbe  .ok_ms
-    mov  rax, 33
-.ok_ms:
-    cvtsi2ss xmm0, rax
-    mulss xmm0, [f_0_01]
+    call time_dt
     movss [dt_seconds], xmm0
     add  rsp, 0x28
     ret
@@ -457,15 +443,15 @@ renderer_init:
     mov  r12d, NUM_SPAWNS
 
 .spawn_loop:
-    mov  eax, [rbx + 0]                 ; type
+    mov  eax, [rbx + 0]
 
-    movss xmm0, [rbx + 4]               ; x
-    movss xmm1, [rbx + 8]               ; y
-    movss xmm2, [rbx + 12]              ; z
-    movss xmm3, [rbx + 16]              ; rot_speed
-    movss xmm4, [rbx + 20]              ; r
-    movss xmm5, [rbx + 24]              ; g
-    movss xmm6, [rbx + 28]              ; b
+    movss xmm0, [rbx + 4]
+    movss xmm1, [rbx + 8]
+    movss xmm2, [rbx + 12]
+    movss xmm3, [rbx + 16]
+    movss xmm4, [rbx + 20]
+    movss xmm5, [rbx + 24]
+    movss xmm6, [rbx + 28]
 
     cmp  eax, E_TYPE_CUBE
     je   .spawn_cube
@@ -536,14 +522,12 @@ renderer_draw:
     mov  ecx, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
     call glClear
 
-    ; camera pos
     call camera_get_pos
     mov  r8, rcx
     lea  rcx, [shader_prog]
     lea  rdx, [u_camera_pos_name]
     call shader_set_vec3
 
-    ; proj / view / pv
     lea  rcx, [mat_proj]
     call camera_get_proj
 
@@ -555,7 +539,6 @@ renderer_draw:
     lea  r8,  [mat_view]
     call mat4_mul
 
-    ; ---- Iterate entity slots ----
     lea  rbx, [entities]
     mov  r12d, MAX_ENTITIES
 
@@ -563,7 +546,6 @@ renderer_draw:
     cmp  dword [rbx + E_TYPE], E_TYPE_EMPTY
     je   .entity_next
 
-    ; model = T * R
     lea  rcx, [mat_tmp]
     movss xmm0, [rbx + E_POS + 0]
     movss xmm1, [rbx + E_POS + 4]
@@ -579,13 +561,11 @@ renderer_draw:
     lea  r8,  [mat_tmp2]
     call mat4_mul
 
-    ; mvp = pv * model
     lea  rcx, [mat_mvp]
     lea  rdx, [mat_pv]
     lea  r8,  [mat_model]
     call mat4_mul
 
-    ; set uniforms
     lea  rcx, [shader_prog]
     lea  rdx, [u_mvp_name]
     lea  r8,  [mat_mvp]
@@ -601,7 +581,6 @@ renderer_draw:
     lea  r8,  [rbx + E_COLOR]
     call shader_set_vec3
 
-    ; draw based on type
     mov  eax, [rbx + E_TYPE]
     cmp  eax, E_TYPE_CUBE
     je   .draw_cube
