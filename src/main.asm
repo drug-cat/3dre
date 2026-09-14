@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/main.asm
-; Multiple cubes with Blinn-Phong specular lighting
+; Cubes + sphere with Blinn-Phong lighting
 ; ============================================================
 BITS 64
 default rel
@@ -60,6 +60,7 @@ extern shader_set_vec3
 extern shader_set_float
 
 extern mesh_create_cube
+extern mesh_create_sphere
 extern mesh_draw
 extern mesh_destroy
 
@@ -82,7 +83,7 @@ global WinMain
 section .data
 align 16
 
-window_title db "3dre - Phong Lit Cubes",0
+window_title db "3dre - Cubes + Sphere",0
 rel_vs_path  db "shaders\basic.vert",0
 rel_fs_path  db "shaders\basic.frag",0
 
@@ -96,8 +97,7 @@ u_spec_col_name   db "uSpecularColor",0
 u_shininess_name  db "uShininess",0
 
 dbg_title       db "3dre Error",0
-dbg_shader_fail db "Shader failed to load.",13,10,13,10
-                db "Check that build/shaders/ contains basic.vert and basic.frag.",0
+dbg_shader_fail db "Shader failed to load.",0
 
 ; ---- Light settings ----
 align 16
@@ -105,25 +105,31 @@ light_dir        dd 0.4, 0.7, 0.5
 light_color      dd 1.0, 1.0, 1.0
 ambient_level    dd 0.25
 
-spec_color       dd 1.0, 1.0, 1.0          ; white highlight
-shininess        dd 64.0                   ; tighter with higher values
+spec_color       dd 1.0, 1.0, 1.0
+shininess        dd 64.0
 
-; ---- Instance list ----
+; ---- Cube instances (32 bytes) ----
+;   +0  f32 x, y, z, pad
+;   +16 f32 angle_y, rot_speed, pad, pad
 align 16
-instances:
-    dd  0.0,  0.0, 0.0,  0.0,    0.0,   0.5,  0.0, 0.0
-    dd  2.0,  0.0, 0.0,  0.0,    0.4,   0.7,  0.0, 0.0
-    dd -2.0,  0.0, 0.0,  0.0,    0.8,   0.9,  0.0, 0.0
-    dd  0.0,  2.0, 0.0,  0.0,    1.2,   0.5,  0.0, 0.0
-    dd  0.0, -2.0, 0.0,  0.0,    1.6,   0.7,  0.0, 0.0
+cube_instances:
+    dd -2.0,  1.5, -1.0,  0.0,    0.0,   0.8,  0.0, 0.0
+    dd  2.0,  1.5, -1.0,  0.0,    0.4,   0.6,  0.0, 0.0
+    dd -3.0, -1.5,  1.0,  0.0,    0.8,   0.7,  0.0, 0.0
+    dd  3.0, -1.5,  1.0,  0.0,    1.2,   0.5,  0.0, 0.0
+    dd  0.0, -2.0,  3.0,  0.0,    1.6,   0.9,  0.0, 0.0
 
-NUM_INSTANCES equ 5
-INSTANCE_SIZE equ 32
+NUM_CUBES    equ 5
+CUBE_SIZE    equ 32
+
+; ---- Sphere instance ----
+align 16
+sphere_pos       dd 0.0, 2.5, 0.0, 0.0
 
 align 16
 f_1_0:      dd 1.0
 f_0_01:     dd 0.01
-bg_rgb:     dd 0.15
+bg_rgb:     dd 0.12
 
 ; ============================================================
 section .bss
@@ -137,6 +143,7 @@ abs_fs_path     resb 260
 
 shader_prog     resb SP_SIZE
 cube_mesh       resb MESH_SIZE
+sphere_mesh     resb MESH_SIZE
 
 mat_proj        resb 64
 mat_view        resb 64
@@ -152,8 +159,6 @@ dt_seconds      resd 1
 ; ============================================================
 section .text
 
-; ============================================================
-; set_light_uniforms — used after init AND after hot reload
 ; ============================================================
 set_light_uniforms:
     sub  rsp, 0x28
@@ -280,6 +285,8 @@ WinMain:
     jmp  .loop
 
 .exit:
+    lea  rcx, [sphere_mesh]
+    call mesh_destroy
     lea  rcx, [cube_mesh]
     call mesh_destroy
     lea  rcx, [shader_prog]
@@ -417,9 +424,17 @@ renderer_init:
     call set_light_uniforms
 
 .no_shader:
+    ; cube mesh
     lea  rcx, [cube_mesh]
     call mesh_create_cube
 
+    ; sphere mesh — 32 slices, 24 stacks (nice and smooth)
+    lea  rcx, [sphere_mesh]
+    mov  edx, 64
+    mov  r8d, 48
+    call mesh_create_sphere
+
+    ; GL state
     mov  ecx, GL_DEPTH_TEST
     call glEnable
     mov  ecx, GL_CULL_FACE
@@ -439,7 +454,6 @@ renderer_draw:
     push r12
     sub  rsp, 0x28
 
-    ; ---- No shader? clear & present ----
     lea  rax, [shader_prog]
     cmp  dword [rax+SP_ID], 0
     jne  .do_draw
@@ -454,7 +468,6 @@ renderer_draw:
     jmp  .present
 
 .do_draw:
-    ; ---- Hot reload ----
     lea  rcx, [shader_prog]
     call shader_program_hot_reload
     test eax, eax
@@ -464,7 +477,6 @@ renderer_draw:
     call set_light_uniforms
 .no_reload:
 
-    ; ---- Clear ----
     movss xmm0, [bg_rgb]
     movss xmm1, [bg_rgb]
     movss xmm2, [bg_rgb]
@@ -473,14 +485,14 @@ renderer_draw:
     mov  ecx, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
     call glClear
 
-    ; ---- Camera position uniform (changes with movement) ----
-    call camera_get_pos            ; rcx = &cam_pos (x,y,z,pad)
+    ; camera position uniform
+    call camera_get_pos
     mov  r8, rcx
     lea  rcx, [shader_prog]
     lea  rdx, [u_camera_pos_name]
     call shader_set_vec3
 
-    ; ---- Proj, View, PV ----
+    ; proj, view, pv
     lea  rcx, [mat_proj]
     call camera_get_proj
 
@@ -492,11 +504,13 @@ renderer_draw:
     lea  r8,  [mat_view]
     call mat4_mul
 
-    ; ---- Iterate instances ----
-    lea  rbx, [instances]
-    mov  r12d, NUM_INSTANCES
+    ; ============================
+    ; draw cubes
+    ; ============================
+    lea  rbx, [cube_instances]
+    mov  r12d, NUM_CUBES
 
-.draw_loop:
+.cube_loop:
     lea  rcx, [mat_tmp]
     movss xmm0, [rbx+0]
     movss xmm1, [rbx+4]
@@ -535,9 +549,36 @@ renderer_draw:
     addss xmm0, [rbx+16]
     movss [rbx+16], xmm0
 
-    add  rbx, INSTANCE_SIZE
+    add  rbx, CUBE_SIZE
     dec  r12d
-    jnz  .draw_loop
+    jnz  .cube_loop
+
+    ; ============================
+    ; draw sphere
+    ; ============================
+    lea  rcx, [mat_model]
+    movss xmm0, [sphere_pos]
+    movss xmm1, [sphere_pos+4]
+    movss xmm2, [sphere_pos+8]
+    call mat4_make_translate
+
+    lea  rcx, [mat_mvp]
+    lea  rdx, [mat_pv]
+    lea  r8,  [mat_model]
+    call mat4_mul
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_mvp_name]
+    lea  r8,  [mat_mvp]
+    call shader_set_mat4
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_model_name]
+    lea  r8,  [mat_model]
+    call shader_set_mat4
+
+    lea  rcx, [sphere_mesh]
+    call mesh_draw
 
 .present:
     call win32_swap_buffers
