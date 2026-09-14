@@ -1,7 +1,6 @@
 ; ============================================================
 ; src/main.asm
-; Entity-based scene: cubes + spheres, Blinn-Phong lighting
-; Timing via QueryPerformanceCounter
+; Entities: cubes, spheres, pyramids with PNG + checkerboard textures
 ; ============================================================
 BITS 64
 default rel
@@ -12,6 +11,7 @@ default rel
 %include "input.inc"
 %include "shader.inc"
 %include "mesh.inc"
+%include "texture.inc"
 %include "entity.inc"
 
 ; ---- GL 3.3 pointers ----
@@ -60,15 +60,24 @@ extern shader_program_destroy
 extern shader_set_mat4
 extern shader_set_vec3
 extern shader_set_float
+extern glGetUniformLocation
+extern glUniform1i
 
 extern mesh_create_cube
 extern mesh_create_sphere
+extern mesh_create_pyramid
 extern mesh_draw
 extern mesh_destroy
+
+extern texture_create_checkerboard
+extern texture_create_from_file
+extern texture_bind
+extern texture_destroy
 
 extern entity_init
 extern entity_spawn_cube
 extern entity_spawn_sphere
+extern entity_spawn_pyramid
 extern entity_update_all
 extern entities
 
@@ -93,13 +102,15 @@ global WinMain
 section .data
 align 16
 
-window_title db "3dre - Entities",0
+window_title db "3dre - Textured Entities",0
 rel_vs_path  db "shaders\basic.vert",0
 rel_fs_path  db "shaders\basic.frag",0
+rel_png_a    db "assets\test.png",0
 
 u_mvp_name        db "uMVP",0
 u_model_name      db "uModel",0
 u_color_name      db "uColor",0
+u_albedo_name     db "uAlbedo",0
 u_light_dir_name  db "uLightDir",0
 u_light_col_name  db "uLightColor",0
 u_ambient_name    db "uAmbient",0
@@ -107,7 +118,8 @@ u_camera_pos_name db "uCameraPos",0
 u_spec_col_name   db "uSpecularColor",0
 u_shininess_name  db "uShininess",0
 
-dbg_title       db "3dre Error",0
+dbg_title       db "3dre",0
+dbg_png_fail    db "PNG load failed - using checkerboard fallback.",0
 dbg_shader_fail db "Shader failed to load.",0
 
 ; ---- Light settings ----
@@ -115,37 +127,36 @@ align 16
 light_dir        dd 0.4, 0.7, 0.5
 light_color      dd 1.0, 1.0, 1.0
 ambient_level    dd 0.25
-
 spec_color       dd 1.0, 1.0, 1.0
 shininess        dd 64.0
 
-; ---- Spawn table (32 bytes per entry) ----
+; ---- Spawn table (36 bytes per entry) ----
 ;   +0  u32  type
-;   +4  f32  x
-;   +8  f32  y
-;   +12 f32  z
-;   +16 f32  rot_speed
-;   +20 f32  color_r
-;   +24 f32  color_g
-;   +28 f32  color_b
+;   +4  u32  texture_slot  (0 = PNG, 1 = checkerboard)
+;   +8  f32  x
+;   +12 f32  y
+;   +16 f32  z
+;   +20 f32  rot_speed
+;   +24 f32  color_r
+;   +28 f32  color_g
+;   +32 f32  color_b
 align 16
 spawn_list:
-    dd E_TYPE_CUBE,      -3.0,  1.5, -1.0,   0.8,   1.0, 0.3, 0.3
-    dd E_TYPE_CUBE,       3.0,  1.5, -1.0,   0.6,   0.3, 1.0, 0.3
-    dd E_TYPE_CUBE,      -3.0, -1.5,  1.0,   0.7,   0.3, 0.3, 1.0
-    dd E_TYPE_CUBE,       3.0, -1.5,  1.0,   0.5,   1.0, 1.0, 0.3
-    dd E_TYPE_SPHERE,    -4.0,  0.0,  0.0,   0.9,   1.0, 0.85, 0.4
-    dd E_TYPE_SPHERE,     0.0,  2.5,  0.0,   1.2,   0.9, 0.9, 0.95
-    dd E_TYPE_SPHERE,     4.0,  0.0,  0.0,   0.9,   0.9, 0.5, 0.5
-    dd E_TYPE_SPHERE,     0.0, -2.5,  0.0,   1.2,   0.5, 0.7, 1.0
+    dd E_TYPE_CUBE,    0,   -3.0,  1.5, -1.0,   0.8,   1.0, 1.0, 1.0
+    dd E_TYPE_CUBE,    1,    3.0,  1.5, -1.0,   0.6,   0.3, 1.0, 0.3
+    dd E_TYPE_PYRAMID, 0,   -3.0, -1.5,  1.0,   0.7,   1.0, 1.0, 1.0
+    dd E_TYPE_PYRAMID, 1,    3.0, -1.5,  1.0,   0.5,   1.0, 1.0, 0.3
+    dd E_TYPE_SPHERE,  0,   -4.0,  0.0,  0.0,   0.9,   1.0, 1.0, 1.0
+    dd E_TYPE_SPHERE,  1,    0.0,  2.5,  0.0,   1.2,   0.9, 0.9, 0.95
+    dd E_TYPE_SPHERE,  0,    4.0,  0.0,  0.0,   0.9,   1.0, 1.0, 1.0
+    dd E_TYPE_SPHERE,  1,    0.0, -2.5,  0.0,   1.2,   0.5, 0.7, 1.0
 
 NUM_SPAWNS equ 8
-SPAWN_SIZE equ 32
+SPAWN_SIZE equ 36
 
 align 16
 f_1_0:      dd 1.0
 bg_rgb:     dd 0.12
-default_tint dd 1.0, 1.0, 1.0
 
 ; ============================================================
 section .bss
@@ -156,10 +167,15 @@ msg             resb 48
 
 abs_vs_path     resb 260
 abs_fs_path     resb 260
+abs_png_a       resb 260
 
 shader_prog     resb SP_SIZE
 cube_mesh       resb MESH_SIZE
 sphere_mesh     resb MESH_SIZE
+pyramid_mesh    resb MESH_SIZE
+
+tex_slot0       resb TEXTURE_SIZE
+tex_slot1       resb TEXTURE_SIZE
 
 mat_proj        resb 64
 mat_view        resb 64
@@ -177,6 +193,11 @@ section .text
 ; ============================================================
 set_light_uniforms:
     sub  rsp, 0x28
+
+    ; guard: no shader loaded yet
+    mov  eax, [shader_prog + SP_ID]
+    test eax, eax
+    jz   .done
 
     lea  rcx, [shader_prog]
     lea  rdx, [u_light_dir_name]
@@ -203,6 +224,17 @@ set_light_uniforms:
     movss xmm2, [shininess]
     call shader_set_float
 
+    ; uAlbedo sampler = 0
+    mov  ecx, [shader_prog + SP_ID]
+    lea  rdx, [u_albedo_name]
+    call qword [glGetUniformLocation]
+    cmp  eax, -1
+    je   .done
+    mov  ecx, eax
+    xor  edx, edx
+    call qword [glUniform1i]
+
+.done:
     add  rsp, 0x28
     ret
 
@@ -300,6 +332,12 @@ WinMain:
     jmp  .loop
 
 .exit:
+    lea  rcx, [tex_slot1]
+    call texture_destroy
+    lea  rcx, [tex_slot0]
+    call texture_destroy
+    lea  rcx, [pyramid_mesh]
+    call mesh_destroy
     lea  rcx, [sphere_mesh]
     call mesh_destroy
     lea  rcx, [cube_mesh]
@@ -436,6 +474,34 @@ renderer_init:
     mov  r8d, 24
     call mesh_create_sphere
 
+    lea  rcx, [pyramid_mesh]
+    call mesh_create_pyramid
+
+    ; ---- Texture slot 0: try PNG, fall back to checkerboard ----
+    lea  rcx, [rel_png_a]
+    lea  rdx, [abs_png_a]
+    mov  r8d, 260
+    call path_join_exe
+
+    lea  rcx, [tex_slot0]
+    lea  rdx, [abs_png_a]
+    call texture_create_from_file
+    test eax, eax
+    jnz  .png_ok
+
+    ; fallback: fine checkerboard
+    lea  rcx, [tex_slot0]
+    mov  edx, 16
+    mov  r8d, 8
+    call texture_create_checkerboard
+
+.png_ok:
+    ; ---- Texture slot 1: chunkier checkerboard ----
+    lea  rcx, [tex_slot1]
+    mov  edx, 32
+    mov  r8d, 4
+    call texture_create_checkerboard
+
     ; ---- Entities ----
     call entity_init
 
@@ -443,20 +509,32 @@ renderer_init:
     mov  r12d, NUM_SPAWNS
 
 .spawn_loop:
-    mov  eax, [rbx + 0]
+    mov  eax, [rbx + 0]                ; type
 
-    movss xmm0, [rbx + 4]
-    movss xmm1, [rbx + 8]
-    movss xmm2, [rbx + 12]
-    movss xmm3, [rbx + 16]
-    movss xmm4, [rbx + 20]
-    movss xmm5, [rbx + 24]
-    movss xmm6, [rbx + 28]
+    ; resolve texture slot → GL id
+    mov  ecx, [rbx + 4]
+    test ecx, ecx
+    jnz  .use_slot1
+    mov  edx, [tex_slot0 + TEX_ID]
+    jmp  .tex_picked
+.use_slot1:
+    mov  edx, [tex_slot1 + TEX_ID]
+.tex_picked:
+
+    movss xmm0, [rbx + 8]
+    movss xmm1, [rbx + 12]
+    movss xmm2, [rbx + 16]
+    movss xmm3, [rbx + 20]
+    movss xmm4, [rbx + 24]
+    movss xmm5, [rbx + 28]
+    movss xmm6, [rbx + 32]
 
     cmp  eax, E_TYPE_CUBE
     je   .spawn_cube
     cmp  eax, E_TYPE_SPHERE
     je   .spawn_sphere
+    cmp  eax, E_TYPE_PYRAMID
+    je   .spawn_pyramid
     jmp  .spawn_next
 
 .spawn_cube:
@@ -464,6 +542,9 @@ renderer_init:
     jmp  .spawn_next
 .spawn_sphere:
     call entity_spawn_sphere
+    jmp  .spawn_next
+.spawn_pyramid:
+    call entity_spawn_pyramid
 
 .spawn_next:
     add  rbx, SPAWN_SIZE
@@ -522,12 +603,14 @@ renderer_draw:
     mov  ecx, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
     call glClear
 
+    ; camera position uniform
     call camera_get_pos
     mov  r8, rcx
     lea  rcx, [shader_prog]
     lea  rdx, [u_camera_pos_name]
     call shader_set_vec3
 
+    ; proj / view / pv = proj * view
     lea  rcx, [mat_proj]
     call camera_get_proj
 
@@ -539,6 +622,7 @@ renderer_draw:
     lea  r8,  [mat_view]
     call mat4_mul
 
+    ; ---- Iterate entity slots ----
     lea  rbx, [entities]
     mov  r12d, MAX_ENTITIES
 
@@ -546,6 +630,7 @@ renderer_draw:
     cmp  dword [rbx + E_TYPE], E_TYPE_EMPTY
     je   .entity_next
 
+    ; model = T * R
     lea  rcx, [mat_tmp]
     movss xmm0, [rbx + E_POS + 0]
     movss xmm1, [rbx + E_POS + 4]
@@ -561,11 +646,28 @@ renderer_draw:
     lea  r8,  [mat_tmp2]
     call mat4_mul
 
+    ; mvp = pv * model
     lea  rcx, [mat_mvp]
     lea  rdx, [mat_pv]
     lea  r8,  [mat_model]
     call mat4_mul
 
+    ; ---- Bind entity texture on unit 0 ----
+    ; E_TEXTURE holds a GL texture id directly. Wrap it in a temporary
+    ; Texture-like struct on stack so texture_bind can read it.
+    mov  eax, [rbx + E_TEXTURE]
+    test eax, eax
+    jz   .no_tex
+    mov  [rsp+0x10], eax
+    mov  dword [rsp+0x14], 0
+    mov  dword [rsp+0x18], 0
+    mov  dword [rsp+0x1C], 0
+    lea  rcx, [rsp+0x10]
+    mov  edx, GL_TEXTURE0
+    call texture_bind
+.no_tex:
+
+    ; ---- Set uniforms ----
     lea  rcx, [shader_prog]
     lea  rdx, [u_mvp_name]
     lea  r8,  [mat_mvp]
@@ -581,11 +683,14 @@ renderer_draw:
     lea  r8,  [rbx + E_COLOR]
     call shader_set_vec3
 
+    ; ---- Dispatch draw by type ----
     mov  eax, [rbx + E_TYPE]
     cmp  eax, E_TYPE_CUBE
     je   .draw_cube
     cmp  eax, E_TYPE_SPHERE
     je   .draw_sphere
+    cmp  eax, E_TYPE_PYRAMID
+    je   .draw_pyramid
     jmp  .entity_next
 
 .draw_cube:
@@ -594,6 +699,10 @@ renderer_draw:
     jmp  .entity_next
 .draw_sphere:
     lea  rcx, [sphere_mesh]
+    call mesh_draw
+    jmp  .entity_next
+.draw_pyramid:
+    lea  rcx, [pyramid_mesh]
     call mesh_draw
 
 .entity_next:
