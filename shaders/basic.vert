@@ -9,11 +9,14 @@ uniform mat4 uModel;
 
 out vec3 vColor;
 out vec3 vNormal;
+out vec3 vWorldPos;
 
 void main()
 {
+    vec4 world = uModel * vec4(aPos, 1.0);
+
     gl_Position = uMVP * vec4(aPos, 1.0);
-    vColor  = aColor;
-    // No scale in our transforms → upper-left 3x3 of uModel is a valid normal transform
-    vNormal = mat3(uModel) * aNormal;
+    vColor    = aColor;
+    vNormal   = mat3(uModel) * aNormal;   // valid for rotation-only models
+    vWorldPos = world.xyz;
 }

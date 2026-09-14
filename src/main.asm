@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/main.asm
-; Multiple cubes with directional lighting
+; Multiple cubes with Blinn-Phong specular lighting
 ; ============================================================
 BITS 64
 default rel
@@ -42,6 +42,7 @@ extern input_mouse_is_active
 
 extern camera_get_view
 extern camera_get_proj
+extern camera_get_pos
 extern camera_update
 
 extern mat4_mul
@@ -81,15 +82,18 @@ global WinMain
 section .data
 align 16
 
-window_title db "3dre - Lit Cubes",0
+window_title db "3dre - Phong Lit Cubes",0
 rel_vs_path  db "shaders\basic.vert",0
 rel_fs_path  db "shaders\basic.frag",0
 
-u_mvp_name       db "uMVP",0
-u_model_name     db "uModel",0
-u_light_dir_name db "uLightDir",0
-u_light_col_name db "uLightColor",0
-u_ambient_name   db "uAmbient",0
+u_mvp_name        db "uMVP",0
+u_model_name      db "uModel",0
+u_light_dir_name  db "uLightDir",0
+u_light_col_name  db "uLightColor",0
+u_ambient_name    db "uAmbient",0
+u_camera_pos_name db "uCameraPos",0
+u_spec_col_name   db "uSpecularColor",0
+u_shininess_name  db "uShininess",0
 
 dbg_title       db "3dre Error",0
 dbg_shader_fail db "Shader failed to load.",13,10,13,10
@@ -97,16 +101,14 @@ dbg_shader_fail db "Shader failed to load.",13,10,13,10
 
 ; ---- Light settings ----
 align 16
-light_dir        dd 0.4, 0.7, 0.5           ; direction FROM surface TO light
+light_dir        dd 0.4, 0.7, 0.5
 light_color      dd 1.0, 1.0, 1.0
 ambient_level    dd 0.25
 
-; ---- Instance list (32 bytes each) ----
-;   +0   f32 x, y, z
-;   +12  pad
-;   +16  f32 angle_y
-;   +20  f32 rot_speed
-;   +24  pad, pad
+spec_color       dd 1.0, 1.0, 1.0          ; white highlight
+shininess        dd 64.0                   ; tighter with higher values
+
+; ---- Instance list ----
 align 16
 instances:
     dd  0.0,  0.0, 0.0,  0.0,    0.0,   0.5,  0.0, 0.0
@@ -149,6 +151,40 @@ dt_seconds      resd 1
 
 ; ============================================================
 section .text
+
+; ============================================================
+; set_light_uniforms — used after init AND after hot reload
+; ============================================================
+set_light_uniforms:
+    sub  rsp, 0x28
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_light_dir_name]
+    lea  r8,  [light_dir]
+    call shader_set_vec3
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_light_col_name]
+    lea  r8,  [light_color]
+    call shader_set_vec3
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_ambient_name]
+    movss xmm2, [ambient_level]
+    call shader_set_float
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_spec_col_name]
+    lea  r8,  [spec_color]
+    call shader_set_vec3
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_shininess_name]
+    movss xmm2, [shininess]
+    call shader_set_float
+
+    add  rsp, 0x28
+    ret
 
 ; ============================================================
 WinMain:
@@ -358,7 +394,6 @@ renderer_init:
     push rbx
     sub  rsp, 0x20
 
-    ; ---- Shader paths ----
     lea  rcx, [rel_vs_path]
     lea  rdx, [abs_vs_path]
     mov  r8d, 260
@@ -369,7 +404,6 @@ renderer_init:
     mov  r8d, 260
     call path_join_exe
 
-    ; ---- Shader program ----
     lea  rcx, [shader_prog]
     lea  rdx, [abs_vs_path]
     lea  r8,  [abs_fs_path]
@@ -380,28 +414,12 @@ renderer_init:
     lea  rcx, [shader_prog]
     call shader_program_use
 
-    ; ---- Set light uniforms once ----
-    lea  rcx, [shader_prog]
-    lea  rdx, [u_light_dir_name]
-    lea  r8,  [light_dir]
-    call shader_set_vec3
-
-    lea  rcx, [shader_prog]
-    lea  rdx, [u_light_col_name]
-    lea  r8,  [light_color]
-    call shader_set_vec3
-
-    lea  rcx, [shader_prog]
-    lea  rdx, [u_ambient_name]
-    movss xmm2, [ambient_level]
-    call shader_set_float
+    call set_light_uniforms
 
 .no_shader:
-    ; ---- Cube mesh ----
     lea  rcx, [cube_mesh]
     call mesh_create_cube
 
-    ; ---- GL state ----
     mov  ecx, GL_DEPTH_TEST
     call glEnable
     mov  ecx, GL_CULL_FACE
@@ -443,23 +461,7 @@ renderer_draw:
     jz   .no_reload
     lea  rcx, [shader_prog]
     call shader_program_use
-
-    ; After reload, re-set light uniforms (they were lost with the old program)
-    lea  rcx, [shader_prog]
-    lea  rdx, [u_light_dir_name]
-    lea  r8,  [light_dir]
-    call shader_set_vec3
-
-    lea  rcx, [shader_prog]
-    lea  rdx, [u_light_col_name]
-    lea  r8,  [light_color]
-    call shader_set_vec3
-
-    lea  rcx, [shader_prog]
-    lea  rdx, [u_ambient_name]
-    movss xmm2, [ambient_level]
-    call shader_set_float
-
+    call set_light_uniforms
 .no_reload:
 
     ; ---- Clear ----
@@ -471,7 +473,14 @@ renderer_draw:
     mov  ecx, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
     call glClear
 
-    ; ---- Proj, View, PV = Proj * View ----
+    ; ---- Camera position uniform (changes with movement) ----
+    call camera_get_pos            ; rcx = &cam_pos (x,y,z,pad)
+    mov  r8, rcx
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_camera_pos_name]
+    call shader_set_vec3
+
+    ; ---- Proj, View, PV ----
     lea  rcx, [mat_proj]
     call camera_get_proj
 
@@ -488,31 +497,26 @@ renderer_draw:
     mov  r12d, NUM_INSTANCES
 
 .draw_loop:
-    ; mat_tmp = T(pos)
     lea  rcx, [mat_tmp]
     movss xmm0, [rbx+0]
     movss xmm1, [rbx+4]
     movss xmm2, [rbx+8]
     call mat4_make_translate
 
-    ; mat_tmp2 = R(angle_y)
     lea  rcx, [mat_tmp2]
     movss xmm0, [rbx+16]
     call mat4_make_rotate_y
 
-    ; mat_model = T * R
     lea  rcx, [mat_model]
     lea  rdx, [mat_tmp]
     lea  r8,  [mat_tmp2]
     call mat4_mul
 
-    ; mat_mvp = PV * mat_model
     lea  rcx, [mat_mvp]
     lea  rdx, [mat_pv]
     lea  r8,  [mat_model]
     call mat4_mul
 
-    ; ---- Set uniforms ----
     lea  rcx, [shader_prog]
     lea  rdx, [u_mvp_name]
     lea  r8,  [mat_mvp]
@@ -523,11 +527,9 @@ renderer_draw:
     lea  r8,  [mat_model]
     call shader_set_mat4
 
-    ; ---- Draw ----
     lea  rcx, [cube_mesh]
     call mesh_draw
 
-    ; ---- Advance rotation ----
     movss xmm0, [dt_seconds]
     mulss xmm0, [rbx+20]
     addss xmm0, [rbx+16]
