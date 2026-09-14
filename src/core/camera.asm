@@ -17,7 +17,7 @@ cam_speed:      dd 1.5
 cam_rot_speed:  dd 0.9
 mouse_sensitivity: dd 0.003
 
-cam_fov:        dd 1.0471975511965976   ; 60° in radians
+cam_fov:        dd 1.0471975511965976
 cam_aspect:     dd 1.3333333333333333
 cam_near:       dd 0.1
 cam_far:        dd 200.0
@@ -57,15 +57,11 @@ extern mouse_delta_x
 extern mouse_delta_y
 
 ; ============================================================
-; camera_get_view(float* out)
-;   view = RotateX(-pitch) * RotateY(-yaw) * Translate(-pos)
-; ============================================================
 camera_get_view:
     push rbx
     sub  rsp, 0x20
     mov  rbx, rcx
 
-    ; m1 = Translate(-pos)
     movss xmm0, [cam_pos]
     xorps xmm0, [sign_flip]
     movss xmm1, [cam_pos+4]
@@ -75,25 +71,21 @@ camera_get_view:
     lea  rcx, [tmp_cam_m1]
     call mat4_make_translate
 
-    ; m2 = RotateY(-yaw)
     movss xmm0, [cam_yaw]
     xorps xmm0, [sign_flip]
     lea  rcx, [tmp_cam_m2]
     call mat4_make_rotate_y
 
-    ; m3 = m2 * m1
     lea  rcx, [tmp_cam_m3]
     lea  rdx, [tmp_cam_m2]
     lea  r8,  [tmp_cam_m1]
     call mat4_mul
 
-    ; m2 = RotateX(-pitch)
     movss xmm0, [cam_pitch]
     xorps xmm0, [sign_flip]
     lea  rcx, [tmp_cam_m2]
     call mat4_make_rotate_x
 
-    ; out = m2 * m3
     mov  rcx, rbx
     lea  rdx, [tmp_cam_m2]
     lea  r8,  [tmp_cam_m3]
@@ -127,25 +119,25 @@ camera_update:
     push rsi
     sub  rsp, 0x28
 
-    movss [rsp], xmm0              ; save dt
+    movss [rsp], xmm0              ; save dt at [rsp+0]
 
-    ; ---- Mouse look (always applied, independent of keys) ----
+    ; ---- Mouse look ----
     cvtsi2ss xmm0, dword [mouse_delta_x]
     mulss xmm0, [mouse_sensitivity]
     movss xmm1, [cam_yaw]
-    subss xmm1, xmm0               ; yaw -= dx * sens
+    subss xmm1, xmm0
     movss [cam_yaw], xmm1
 
     cvtsi2ss xmm0, dword [mouse_delta_y]
     mulss xmm0, [mouse_sensitivity]
     movss xmm1, [cam_pitch]
-    subss xmm1, xmm0               ; pitch -= dy * sens
+    subss xmm1, xmm0
     movss [cam_pitch], xmm1
 
     ; ---- Rotation speed * dt ----
     movss xmm0, [rsp]
     mulss xmm0, [cam_rot_speed]
-    movss [rsp+4], xmm0
+    movss [rsp+4], xmm0            ; rot amount
 
     ; ---- Q/E yaw ----
     mov  ecx, VK_Q
@@ -183,7 +175,7 @@ camera_update:
     movss [cam_pitch], xmm0
 .no_f:
 
-    ; ---- Clamp pitch to [-pi/2, pi/2] ----
+    ; ---- Clamp pitch ----
     movss xmm0, [cam_pitch]
     movss xmm1, [f_half_pi]
     minss xmm0, xmm1
@@ -191,34 +183,41 @@ camera_update:
     maxss xmm0, xmm2
     movss [cam_pitch], xmm0
 
-    ; ---- Movement speed * dt ----
+    ; ---- Movement distance: dist = dt * cam_speed ----
     movss xmm0, [rsp]
     mulss xmm0, [cam_speed]
-    movss [rsp+28], xmm0
+    movss [rsp+8], xmm0            ; move_dist at [rsp+8]
 
-    ; ---- WASD ----
+    ; ---- W ----
     mov  ecx, VK_W
     call input_is_down
     test eax, eax
     jz   .no_w
+    movss xmm0, [rsp+8]
     call camera_move_forward
 .no_w:
+    ; ---- S ----
     mov  ecx, VK_S
     call input_is_down
     test eax, eax
     jz   .no_s
+    movss xmm0, [rsp+8]
     call camera_move_backward
 .no_s:
+    ; ---- A ----
     mov  ecx, VK_A
     call input_is_down
     test eax, eax
     jz   .no_a
+    movss xmm0, [rsp+8]
     call camera_move_left
 .no_a:
+    ; ---- D ----
     mov  ecx, VK_D
     call input_is_down
     test eax, eax
     jz   .no_d
+    movss xmm0, [rsp+8]
     call camera_move_right
 .no_d:
 
@@ -228,32 +227,35 @@ camera_update:
     ret
 
 ; ============================================================
-; Internal movement helpers
-; move_dist is at [rsp + 0x18 + 28] of caller's frame
+; camera_move_forward(float dist)   ; xmm0 = dist
 ; ============================================================
-
 camera_move_forward:
     sub  rsp, 0x18
+    movss [rsp+0x10], xmm0         ; save dist
+
+    ; fx = sin(yaw) * cos(pitch) * dist
     fld  dword [cam_yaw]
     fsin
     fld  dword [cam_pitch]
     fcos
     fmulp st1, st0
-    fmul dword [rsp+0x18+28]
+    fmul dword [rsp+0x10]
     fstp dword [rsp]
 
+    ; fy = sin(pitch) * dist
     fld  dword [cam_pitch]
     fsin
-    fmul dword [rsp+0x18+28]
+    fmul dword [rsp+0x10]
     fstp dword [rsp+4]
 
+    ; fz = -cos(yaw) * cos(pitch) * dist
     fld  dword [cam_yaw]
     fcos
     fld  dword [cam_pitch]
     fcos
     fmulp st1, st0
     fchs
-    fmul dword [rsp+0x18+28]
+    fmul dword [rsp+0x10]
     fstp dword [rsp+8]
 
     movss xmm0, [cam_pos]
@@ -269,29 +271,44 @@ camera_move_forward:
     add  rsp, 0x18
     ret
 
+; ============================================================
+; camera_move_backward(float dist)
+; ============================================================
+; ============================================================
+; camera_move_backward(float dist)   ; xmm0 = dist
+;   Same formula as forward, but with dist negated.
+; ============================================================
 camera_move_backward:
     sub  rsp, 0x18
+
+    ; negate dist in xmm0 using sign mask
+    movss xmm1, [sign_flip]
+    xorps xmm0, xmm1               ; xmm0 = -dist
+    movss [rsp+0x10], xmm0
+
+    ; bx = sin(yaw) * cos(pitch) * (-dist)
     fld  dword [cam_yaw]
     fsin
     fld  dword [cam_pitch]
     fcos
     fmulp st1, st0
-    fmul dword [rsp+0x18+28]
-    fchs
+    fmul dword [rsp+0x10]
     fstp dword [rsp]
 
+    ; by = sin(pitch) * (-dist)
     fld  dword [cam_pitch]
     fsin
-    fmul dword [rsp+0x18+28]
-    fchs
+    fmul dword [rsp+0x10]
     fstp dword [rsp+4]
 
+    ; bz = -cos(yaw) * cos(pitch) * (-dist)
     fld  dword [cam_yaw]
     fcos
     fld  dword [cam_pitch]
     fcos
     fmulp st1, st0
-    fmul dword [rsp+0x18+28]
+    fchs
+    fmul dword [rsp+0x10]
     fstp dword [rsp+8]
 
     movss xmm0, [cam_pos]
@@ -307,19 +324,27 @@ camera_move_backward:
     add  rsp, 0x18
     ret
 
+; ============================================================
+; camera_move_left(float dist)
+;   right = (cos(yaw), 0, sin(yaw)); left = -right
+; ============================================================
 camera_move_left:
     sub  rsp, 0x18
+    movss [rsp+0x10], xmm0
+
+    ; lx = -cos(yaw) * dist
     fld  dword [cam_yaw]
     fcos
-    fmul dword [rsp+0x18+28]
+    fmul dword [rsp+0x10]
     fchs
     fstp dword [rsp]
 
     mov  dword [rsp+4], 0
 
+    ; lz = -sin(yaw) * dist
     fld  dword [cam_yaw]
     fsin
-    fmul dword [rsp+0x18+28]
+    fmul dword [rsp+0x10]
     fchs
     fstp dword [rsp+8]
 
@@ -333,18 +358,25 @@ camera_move_left:
     add  rsp, 0x18
     ret
 
+; ============================================================
+; camera_move_right(float dist)
+; ============================================================
 camera_move_right:
     sub  rsp, 0x18
+    movss [rsp+0x10], xmm0
+
+    ; rx = cos(yaw) * dist
     fld  dword [cam_yaw]
     fcos
-    fmul dword [rsp+0x18+28]
+    fmul dword [rsp+0x10]
     fstp dword [rsp]
 
     mov  dword [rsp+4], 0
 
+    ; rz = sin(yaw) * dist
     fld  dword [cam_yaw]
     fsin
-    fmul dword [rsp+0x18+28]
+    fmul dword [rsp+0x10]
     fstp dword [rsp+8]
 
     movss xmm0, [cam_pos]
