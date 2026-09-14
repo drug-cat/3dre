@@ -3,9 +3,9 @@
 in vec3 vColor;
 in vec3 vNormal;
 
-uniform vec3  uLightDir;      // world-space direction FROM surface TOWARD light (will be normalized)
-uniform vec3  uLightColor;    // light color multiplier
-uniform float uAmbient;       // ambient floor
+uniform vec3  uLightDir;
+uniform vec3  uLightColor;
+uniform float uAmbient;
 
 out vec4 FragColor;
 
@@ -15,6 +15,6 @@ void main()
     vec3 L = normalize(uLightDir);
     float ndl = max(dot(N, L), 0.0);
 
-    vec3 lit = vColor * (uAmbient + pow(ndl, 3.0) * uLightColor);  // tighter falloff
-    FragColor = vec4(lit, 1.0);
+    // DEBUG: show lighting as pure grayscale
+    FragColor = vec4(vec3(ndl), 1.0);
 }
