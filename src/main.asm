@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/main.asm
-; Rotating cube + FPS camera with mouse look
+; Rotating cube + FPS camera + shaders + hot reload
 ; ============================================================
 BITS 64
 default rel
@@ -9,16 +9,9 @@ default rel
 %include "gl.inc"
 %include "math.inc"
 %include "input.inc"
+%include "shader.inc"
 
 ; ---- GL 3.3 pointers ----
-extern glCreateShader
-extern glShaderSource
-extern glCompileShader
-extern glCreateProgram
-extern glAttachShader
-extern glLinkProgram
-extern glUseProgram
-extern glDeleteShader
 extern glGenVertexArrays
 extern glBindVertexArray
 extern glGenBuffers
@@ -27,8 +20,6 @@ extern glBufferData
 extern glVertexAttribPointer
 extern glEnableVertexAttribArray
 extern glDrawElements
-extern glGetUniformLocation
-extern glUniformMatrix4fv
 
 ; ---- GL 1.1 direct ----
 extern glClear
@@ -52,6 +43,7 @@ extern input_end_frame
 extern input_enable_mouse_look
 extern input_disable_mouse_look
 extern input_poll_mouse
+extern input_mouse_is_active
 
 extern camera_get_view
 extern camera_get_proj
@@ -59,6 +51,14 @@ extern camera_update
 
 extern mat4_mul
 extern mat4_make_rotate_y
+
+extern path_join_exe
+
+extern shader_program_init
+extern shader_program_hot_reload
+extern shader_program_use
+extern shader_program_destroy
+extern shader_set_mat4
 
 ; ---- Win32 ----
 extern GetModuleHandleA
@@ -71,8 +71,7 @@ extern DefWindowProcA
 extern PostQuitMessage
 extern DestroyWindow
 extern GetTickCount64
-
-extern input_mouse_is_active
+extern MessageBoxA
 
 global WinMain
 
@@ -80,28 +79,14 @@ global WinMain
 section .data
 align 16
 
-window_title db "3dre - FPS Camera Demo",0
+window_title db "3dre - FPS Camera + Hot Reload",0
+rel_vs_path  db "shaders\basic.vert",0
+rel_fs_path  db "shaders\basic.frag",0
+u_mvp_name   db "uMVP",0
 
-vertex_shader_src:
-    db "#version 330 core",13,10
-    db "layout(location = 0) in vec3 aPos;",13,10
-    db "layout(location = 1) in vec3 aColor;",13,10
-    db "uniform mat4 uMVP;",13,10
-    db "out vec3 vColor;",13,10
-    db "void main() {",13,10
-    db "    gl_Position = uMVP * vec4(aPos, 1.0);",13,10
-    db "    vColor = aColor;",13,10
-    db "}",0
-
-fragment_shader_src:
-    db "#version 330 core",13,10
-    db "in vec3 vColor;",13,10
-    db "out vec4 FragColor;",13,10
-    db "void main() {",13,10
-    db "    FragColor = vec4(vColor, 1.0);",13,10
-    db "}",0
-
-uniform_mvp_name db "uMVP",0
+dbg_title       db "3dre Error",0
+dbg_shader_fail db "Shader failed to load.",13,10,13,10
+                db "Check that build/shaders/ contains basic.vert and basic.frag.",0
 
 align 16
 cube_vertices:
@@ -153,19 +138,20 @@ rot_speed:  dd 0.8
 
 ; ============================================================
 section .bss
-align 16
 
 hInstance       resq 1
 hwnd            resq 1
 msg             resb 48
 
-shader_program  resd 1
 vao             resd 1
 vbo             resd 1
 ebo             resd 1
-u_mvp_loc       resd 1
 
-align 16
+abs_vs_path     resb 260
+abs_fs_path     resb 260
+
+shader_prog     resb SP_SIZE
+
 mat_model       resb 64
 mat_view        resb 64
 mat_proj        resb 64
@@ -179,6 +165,7 @@ dt_seconds      resd 1
 ; ============================================================
 section .text
 
+; ============================================================
 WinMain:
     push rbx
     push rsi
@@ -207,15 +194,11 @@ WinMain:
     jz   .exit
     mov  [hwnd], rax
 
-    mov  rcx, rax
+    mov  rcx, [hwnd]
     mov  edx, SW_SHOW
     call ShowWindow
     mov  rcx, [hwnd]
     call UpdateWindow
-
-    ; ; ---- Enable mouse look after window is created ----
-    ; mov  rcx, [hwnd]
-    ; call input_enable_mouse_look
 
     mov  rcx, [hwnd]
     call win32_create_gl_context
@@ -229,6 +212,21 @@ WinMain:
     call input_init
     call renderer_init
 
+    ; --- Verify shader loaded ---
+    lea  rax, [shader_prog]
+    cmp  dword [rax+SP_ID], 0
+    jne  .shader_ok
+
+    sub  rsp, 0x20
+    xor  ecx, ecx
+    lea  rdx, [dbg_shader_fail]
+    lea  r8,  [dbg_title]
+    mov  r9d, 0x10
+    call MessageBoxA
+    add  rsp, 0x20
+    jmp  .exit
+
+.shader_ok:
     call GetTickCount64
     mov  [last_tick], rax
     mov  dword [angle_y], 0
@@ -263,8 +261,11 @@ WinMain:
     jmp  .loop
 
 .exit:
+    lea  rcx, [shader_prog]
+    call shader_program_destroy
     call input_disable_mouse_look
     call win32_destroy_gl_context
+
     add  rsp, 0x40
     pop  rdi
     pop  rsi
@@ -320,7 +321,6 @@ WndProc:
     ret
 
 .activate:
-    ; wParam low word: WA_INACTIVE=0, WA_ACTIVE=1, WA_CLICKACTIVE=2
     movzx eax, r8w
     test  eax, eax
     jz    .deactivate
@@ -369,86 +369,47 @@ WndProc:
     ret
 
 ; ============================================================
+; renderer_init
+;   FIX: sub rsp, 0x30 (was 0x20) — glVertexAttribPointer takes
+;   2 stack args at [rsp+0x20] and [rsp+0x28]. With only 0x20
+;   bytes allocated, those two writes were clobbering saved rbx
+;   and the return address.
+; ============================================================
 renderer_init:
     push rbx
-    push rsi
-    push rdi
     sub  rsp, 0x30
 
-    ; Vertex shader
-    mov  ecx, GL_VERTEX_SHADER
-    call qword [glCreateShader]
+    ; --- Build absolute shader paths ---
+    lea  rcx, [rel_vs_path]
+    lea  rdx, [abs_vs_path]
+    mov  r8d, 260
+    call path_join_exe
+
+    lea  rcx, [rel_fs_path]
+    lea  rdx, [abs_fs_path]
+    mov  r8d, 260
+    call path_join_exe
+
+    ; --- Init shader program ---
+    lea  rcx, [shader_prog]
+    lea  rdx, [abs_vs_path]
+    lea  r8,  [abs_fs_path]
+    call shader_program_init
     test eax, eax
-    jz   .done
-    mov  ebx, eax
+    jz   .no_shader
 
-    lea  rax, [vertex_shader_src]
-    mov  [rsp+0x20], rax
-    mov  rcx, rbx
-    mov  edx, 1
-    lea  r8,  [rsp+0x20]
-    xor  r9d, r9d
-    call qword [glShaderSource]
+    lea  rcx, [shader_prog]
+    call shader_program_use
 
-    mov  rcx, rbx
-    call qword [glCompileShader]
-
-    ; Fragment shader
-    mov  ecx, GL_FRAGMENT_SHADER
-    call qword [glCreateShader]
-    test eax, eax
-    jz   .done
-    mov  esi, eax
-
-    lea  rax, [fragment_shader_src]
-    mov  [rsp+0x20], rax
-    mov  rcx, rsi
-    mov  edx, 1
-    lea  r8,  [rsp+0x20]
-    xor  r9d, r9d
-    call qword [glShaderSource]
-
-    mov  rcx, rsi
-    call qword [glCompileShader]
-
-    ; Link
-    call qword [glCreateProgram]
-    test eax, eax
-    jz   .done
-    mov  edi, eax
-
-    mov  rcx, rdi
-    mov  edx, ebx
-    call qword [glAttachShader]
-    mov  rcx, rdi
-    mov  edx, esi
-    call qword [glAttachShader]
-
-    mov  rcx, rdi
-    call qword [glLinkProgram]
-    mov  rcx, rdi
-    call qword [glUseProgram]
-    mov  [shader_program], edi
-
-    mov  rcx, rbx
-    call qword [glDeleteShader]
-    mov  rcx, rsi
-    call qword [glDeleteShader]
-
-    ; uMVP location
-    mov  rcx, rdi
-    lea  rdx, [uniform_mvp_name]
-    call qword [glGetUniformLocation]
-    mov  [u_mvp_loc], eax
-
-    ; VAO
+.no_shader:
+    ; --- VAO ---
     mov  ecx, 1
     lea  rdx, [vao]
     call qword [glGenVertexArrays]
     mov  ecx, [vao]
     call qword [glBindVertexArray]
 
-    ; VBO
+    ; --- VBO ---
     mov  ecx, 1
     lea  rdx, [vbo]
     call qword [glGenBuffers]
@@ -462,7 +423,7 @@ renderer_init:
     mov  r9d, GL_STATIC_DRAW
     call qword [glBufferData]
 
-    ; aPos
+    ; --- aPos (2 stack args at [rsp+0x20] and [rsp+0x28]) ---
     mov  ecx, 0
     mov  edx, 3
     mov  r8d, GL_FLOAT
@@ -473,7 +434,7 @@ renderer_init:
     mov  ecx, 0
     call qword [glEnableVertexAttribArray]
 
-    ; aColor
+    ; --- aColor (2 stack args at [rsp+0x20] and [rsp+0x28]) ---
     mov  ecx, 1
     mov  edx, 3
     mov  r8d, GL_FLOAT
@@ -484,7 +445,7 @@ renderer_init:
     mov  ecx, 1
     call qword [glEnableVertexAttribArray]
 
-    ; EBO
+    ; --- EBO ---
     mov  ecx, 1
     lea  rdx, [ebo]
     call qword [glGenBuffers]
@@ -498,7 +459,7 @@ renderer_init:
     mov  r9d, GL_STATIC_DRAW
     call qword [glBufferData]
 
-    ; GL state
+    ; --- GL state ---
     mov  ecx, GL_DEPTH_TEST
     call glEnable
     mov  ecx, GL_CULL_FACE
@@ -508,10 +469,7 @@ renderer_init:
     mov  ecx, GL_CCW
     call glFrontFace
 
-.done:
     add  rsp, 0x30
-    pop  rdi
-    pop  rsi
     pop  rbx
     ret
 
@@ -519,11 +477,32 @@ renderer_init:
 renderer_draw:
     sub  rsp, 0x28
 
-    ; Animate
+    lea  rax, [shader_prog]
+    cmp  dword [rax+SP_ID], 0
+    jne  .do_draw
+
+    movss xmm0, [bg_rgb]
+    movss xmm1, [bg_rgb]
+    movss xmm2, [bg_rgb]
+    movss xmm3, [f_1_0]
+    call glClearColor
+    mov  ecx, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
+    call glClear
+    jmp  .present
+
+.do_draw:
     movss xmm0, [dt_seconds]
     mulss xmm0, [rot_speed]
     addss xmm0, [angle_y]
     movss [angle_y], xmm0
+
+    lea  rcx, [shader_prog]
+    call shader_program_hot_reload
+    test eax, eax
+    jz   .no_reload
+    lea  rcx, [shader_prog]
+    call shader_program_use
+.no_reload:
 
     lea  rcx, [mat_proj]
     call camera_get_proj
@@ -550,15 +529,13 @@ renderer_draw:
     movss xmm2, [bg_rgb]
     movss xmm3, [f_1_0]
     call glClearColor
-
     mov  ecx, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
     call glClear
 
-    mov  ecx, [u_mvp_loc]
-    mov  edx, 1
-    xor  r8d, r8d
-    lea  r9,  [mat_mvp]
-    call qword [glUniformMatrix4fv]
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_mvp_name]
+    lea  r8,  [mat_mvp]
+    call shader_set_mat4
 
     mov  ecx, [vao]
     call qword [glBindVertexArray]
@@ -568,6 +545,7 @@ renderer_draw:
     xor  r9d, r9d
     call qword [glDrawElements]
 
+.present:
     call win32_swap_buffers
     add  rsp, 0x28
     ret

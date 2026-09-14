@@ -25,8 +25,10 @@ all: $(TARGET)
 $(TARGET): $(OBJECTS)
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+	@mkdir -p $(BLD_DIR)/shaders
+	@cp -u shaders/* $(BLD_DIR)/shaders/ 2>/dev/null || true
 	@echo "=== Built: $@ ==="
-
+	
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.asm
 	@mkdir -p $(dir $@)
 	$(ASM) $(ASMFLAGS) -o $@ $<
