@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/main.asm
-; Skybox + normal map + shadows + point lights + save/load
+; Skybox + normal map + shadows + point lights + save/load + audio
 ; ============================================================
 BITS 64
 default rel
@@ -104,6 +104,10 @@ extern framebuffer_create_shadow
 extern framebuffer_bind
 extern framebuffer_unbind
 extern framebuffer_destroy
+
+extern audio_init
+extern audio_play_spawn
+extern audio_shutdown
 
 extern time_init
 extern time_dt
@@ -467,6 +471,9 @@ spawn_at_camera:
 
     mov  r12d, ecx
 
+    ; play the spawn sound
+    call audio_play_spawn
+
     fld  dword [cam_yaw]
     fsincos
     fstp dword [rsp+0x00]
@@ -590,8 +597,6 @@ handle_entity_input:
     ret
 
 ; ============================================================
-; save_scene — 36-byte header + N * 68 payload
-; ============================================================
 save_scene:
     push rbx
     sub  rsp, 0x30
@@ -601,12 +606,10 @@ save_scene:
     mov  r8d, 260
     call path_join_exe
 
-    ; pack entities at save_buf + 36
     lea  rcx, [save_buf + 36]
     call entity_save_to_buffer
     mov  rbx, rax
 
-    ; header
     mov  dword [save_buf + 0], 0x45524433
     mov  dword [save_buf + 4], 1
     mov  [save_buf + 8], ebx
@@ -626,7 +629,6 @@ save_scene:
     mov  eax, [cam_pitch]
     mov  [save_buf + 32], eax
 
-    ; write
     lea  rcx, [abs_save_path]
     lea  rdx, [save_buf]
     lea  r8,  [rbx + 36]
@@ -636,8 +638,6 @@ save_scene:
     pop  rbx
     ret
 
-; ============================================================
-; load_scene
 ; ============================================================
 load_scene:
     push rbx
@@ -957,6 +957,7 @@ WinMain:
     call input_init
     call time_init
     call image_init
+    call audio_init
     call renderer_init
 
     lea  rax, [shader_prog]
@@ -1007,6 +1008,7 @@ WinMain:
     jmp  .loop
 
 .exit:
+    call audio_shutdown
     call image_shutdown
     lea  rcx, [skybox_mesh]
     call mesh_destroy
@@ -1088,7 +1090,7 @@ WndProc:
 .deactivate:
     call  input_disable_mouse_look
     add  rsp, 0x28
-    xor  eax, eax
+    xor   eax, eax
     ret
 
 .keydown:
@@ -1176,7 +1178,6 @@ renderer_init:
     mov  r8d, 260
     call path_join_exe
 
-    ; main program
     lea  rcx, [shader_prog]
     lea  rdx, [abs_vs_path]
     lea  r8,  [abs_fs_path]
