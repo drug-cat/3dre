@@ -7,19 +7,21 @@ layout(location = 3) in vec2 aUV;
 
 uniform mat4 uMVP;
 uniform mat4 uModel;
+uniform mat4 uLightMVP;
 
 out vec3 vColor;
 out vec3 vNormal;
 out vec3 vWorldPos;
 out vec2 vUV;
+out vec4 vLightSpacePos;
 
 void main()
 {
     vec4 world = uModel * vec4(aPos, 1.0);
-
     gl_Position = uMVP * vec4(aPos, 1.0);
     vColor    = aColor;
     vNormal   = mat3(uModel) * aNormal;
     vWorldPos = world.xyz;
     vUV       = aUV;
+    vLightSpacePos = uLightMVP * vec4(aPos, 1.0);
 }

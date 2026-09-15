@@ -4,21 +4,50 @@ in vec3 vColor;
 in vec3 vNormal;
 in vec3 vWorldPos;
 in vec2 vUV;
+in vec4 vLightSpacePos;
 
 uniform sampler2D uAlbedo;
+uniform sampler2D uShadowMap;
+
 uniform vec3  uColor;
 uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform float uAmbient;
+
 uniform vec3  uCameraPos;
+uniform vec3  uSpecularColor;
+uniform float uShininess;
+
 uniform vec3  lightA_pos;
 uniform vec3  lightA_color;
 uniform vec3  lightB_pos;
 uniform vec3  lightB_color;
 uniform float uPointIntensity;
+
 uniform float uUnlit;
+uniform float uShadowEnabled;
 
 out vec4 FragColor;
+
+float computeShadow()
+{
+    if (uShadowEnabled < 0.5) return 1.0;
+
+    vec3 proj = vLightSpacePos.xyz / vLightSpacePos.w;
+    proj = proj * 0.5 + 0.5;
+    if (proj.z > 1.0) return 1.0;
+
+    float bias = 0.0035;
+    float shadow = 0.0;
+    vec2 texel = 1.0 / textureSize(uShadowMap, 0);
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
+            float d = texture(uShadowMap, proj.xy + vec2(x, y) * texel).r;
+            shadow += (proj.z - bias > d) ? 0.0 : 1.0;
+        }
+    }
+    return shadow / 9.0;
+}
 
 void main()
 {
@@ -31,24 +60,37 @@ void main()
     vec3 base = vColor * uColor * tex;
 
     vec3 N = normalize(vNormal);
+    vec3 V = normalize(uCameraPos - vWorldPos);
 
-    // ---- Sun ----
-    vec3  L   = normalize(uSunDir);
-    float ndl = max(dot(N, L), 0.0);
-    vec3 lit = base * (uAmbient + ndl * uSunColor);
+    // Directional sun (with shadow)
+    vec3  L    = normalize(uSunDir);
+    float ndl  = max(dot(N, L), 0.0);
+    vec3  H    = normalize(L + V);
+    float spec = pow(max(dot(N, H), 0.0), uShininess);
+    spec *= step(0.0001, ndl);
+    float sh   = computeShadow();
+    vec3 lit = (base * (uAmbient + ndl * uSunColor) + uSpecularColor * spec) * sh;
 
-    // ---- Point light A ----
+    // Point light A
     {
-        vec3  dA  = lightA_pos - vWorldPos;
-        float lA  = max(dot(N, normalize(dA)), 0.0);
-        lit += base * lA * lightA_color * (uPointIntensity / (1.0 + dot(dA, dA)));
+        vec3  toL   = lightA_pos - vWorldPos;
+        float d2    = dot(toL, toL);
+        float d     = sqrt(d2);
+        vec3  Lp    = toL / max(d, 0.0001);
+        float atten = uPointIntensity / (1.0 + d2 * 0.4);
+        float n     = max(dot(N, Lp), 0.0);
+        lit += base * n * atten * lightA_color;
     }
 
-    // ---- Point light B ----
+    // Point light B
     {
-        vec3  dB  = lightB_pos - vWorldPos;
-        float lB  = max(dot(N, normalize(dB)), 0.0);
-        lit += base * lB * lightB_color * (uPointIntensity / (1.0 + dot(dB, dB)));
+        vec3  toL   = lightB_pos - vWorldPos;
+        float d2    = dot(toL, toL);
+        float d     = sqrt(d2);
+        vec3  Lp    = toL / max(d, 0.0001);
+        float atten = uPointIntensity / (1.0 + d2 * 0.4);
+        float n     = max(dot(N, Lp), 0.0);
+        lit += base * n * atten * lightB_color;
     }
 
     FragColor = vec4(lit, 1.0);

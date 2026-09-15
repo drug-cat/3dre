@@ -91,4 +91,22 @@ extern glGetError
 extern glEnable
 extern glDisable
 
+; ---- Framebuffers / shadow ----
+%define GL_FRAMEBUFFER                0x8D40
+%define GL_DEPTH_ATTACHMENT           0x8D00
+%define GL_DEPTH_COMPONENT            0x1902
+%define GL_DEPTH_COMPONENT24          0x81A6
+%define GL_FRAMEBUFFER_COMPLETE       0x8CD5
+%define GL_NONE                       0
+%define GL_CLAMP_TO_BORDER            0x812D
+%define GL_TEXTURE_BORDER_COLOR       0x1004
+%define GL_TEXTURE_COMPARE_MODE       0x884C
+%define GL_COMPARE_REF_TO_TEXTURE     0x884E
+%define GL_TEXTURE_COMPARE_FUNC       0x884D
+%define GL_LEQUAL                     0x0203
+
+extern glDrawBuffer
+extern glReadBuffer
+extern glTexParameterfv
+extern glViewport
 %endif

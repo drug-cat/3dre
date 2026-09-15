@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/main.asm
-; Physics + rolling spheres + point lights + crosshair
+; Physics + shadow mapping + point lights + crosshair
 ; ============================================================
 BITS 64
 default rel
@@ -13,6 +13,7 @@ default rel
 %include "mesh.inc"
 %include "texture.inc"
 %include "entity.inc"
+%include "framebuffer.inc"
 
 extern glBindVertexArray
 extern glDrawElements
@@ -22,6 +23,7 @@ extern glEnable
 extern glDisable
 extern glCullFace
 extern glFrontFace
+extern glViewport
 
 extern win32_register_class
 extern win32_create_window
@@ -56,6 +58,8 @@ extern mat4_make_rotate_x
 extern mat4_make_rotate_y
 extern mat4_make_rotate_z
 extern mat4_make_scale
+extern mat4_make_ortho
+extern mat4_make_look_at
 
 extern path_join_exe
 
@@ -89,6 +93,11 @@ extern entity_destroy_last
 extern entity_update_all
 extern entities
 
+extern framebuffer_create_shadow
+extern framebuffer_bind
+extern framebuffer_unbind
+extern framebuffer_destroy
+
 extern time_init
 extern time_dt
 
@@ -112,15 +121,18 @@ global WinMain
 section .data
 align 16
 
-window_title db "3dre | Point Lights | C/V/B=spawn  Del=remove",0
+window_title db "3dre | Shadows | C/V/B=spawn  Del=remove",0
 rel_vs_path  db "shaders\basic.vert",0
 rel_fs_path  db "shaders\basic.frag",0
+rel_shadow_vs db "shaders\shadow.vert",0
+rel_shadow_fs db "shaders\shadow.frag",0
 rel_png_a    db "assets\test.png",0
 
 u_mvp_name          db "uMVP",0
 u_model_name        db "uModel",0
 u_color_name        db "uColor",0
 u_albedo_name       db "uAlbedo",0
+u_shadow_map_name   db "uShadowMap",0
 u_sun_dir_name      db "uSunDir",0
 u_sun_col_name      db "uSunColor",0
 u_ambient_name      db "uAmbient",0
@@ -133,9 +145,14 @@ u_lightB_pos_name   db "lightB_pos",0
 u_lightB_col_name   db "lightB_color",0
 u_point_inten_name  db "uPointIntensity",0
 u_unlit_name        db "uUnlit",0
+u_shadow_en_name    db "uShadowEnabled",0
+u_light_mvp_name    db "uLightMVP",0
 
 dbg_title       db "3dre Debug",0
 dbg_shader_fail db "Shader failed to load.",0
+
+SHADOW_W equ 1024
+SHADOW_H equ 1024
 
 align 16
 sun_dir          dd 0.4, 0.7, 0.5
@@ -148,6 +165,18 @@ align 16
 lightA_color:    dd 1.0, 0.15, 0.15
 lightB_color:    dd 0.15, 0.35, 1.0
 
+; ---- light camera setup ----
+align 16
+light_eye:       dd 12.0, 21.0, 15.0
+light_center:    dd 0.0, 0.0, 0.0
+light_up:        dd 0.0, 1.0, 0.0
+light_left:      dd -15.0
+light_right:     dd  15.0
+light_bottom:    dd -15.0
+light_top:       dd  15.0
+light_near:      dd  1.0
+light_far:       dd  60.0
+
 ground_pos_y:    dd -4.05
 ground_scale_x:  dd 20.0
 ground_scale_y:  dd 0.1
@@ -155,7 +184,6 @@ ground_scale_z:  dd 20.0
 ground_color:    dd 0.30, 0.32, 0.36
 
 spawn_forward_speed: dd 3.0
-
 point_intensity:    dd 8.0
 light_orbit_radius: dd 4.0
 light_orbit_y:      dd 1.5
@@ -189,9 +217,14 @@ msg             resb 48
 
 abs_vs_path     resb 260
 abs_fs_path     resb 260
+abs_shadow_vs   resb 260
+abs_shadow_fs   resb 260
 abs_png_a       resb 260
 
 shader_prog     resb SP_SIZE
+shadow_prog     resb SP_SIZE
+shadow_fb       resb FB_SIZE
+
 cube_mesh       resb MESH_SIZE
 sphere_mesh     resb MESH_SIZE
 pyramid_mesh    resb MESH_SIZE
@@ -209,6 +242,10 @@ mat_scratch     resb 64
 mat_model       resb 64
 mat_mvp         resb 64
 mat_identity    resb 64
+mat_light_view  resb 64
+mat_light_proj  resb 64
+mat_light_vp    resb 64
+mat_light_mvp   resb 64
 
 dt_seconds      resd 1
 spawn_fwd       resd 3
@@ -229,7 +266,6 @@ set_static_uniforms:
     test eax, eax
     jz   .done
 
-    ; sun
     lea  rcx, [shader_prog]
     lea  rdx, [u_sun_dir_name]
     lea  r8,  [sun_dir]
@@ -255,7 +291,6 @@ set_static_uniforms:
     movss xmm2, [shininess]
     call shader_set_float
 
-    ; light colors
     lea  rcx, [shader_prog]
     lea  rdx, [u_lightA_col_name]
     lea  r8,  [lightA_color]
@@ -266,7 +301,6 @@ set_static_uniforms:
     lea  r8,  [lightB_color]
     call shader_set_vec3
 
-    ; point intensity
     lea  rcx, [shader_prog]
     lea  rdx, [u_point_inten_name]
     movss xmm2, [point_intensity]
@@ -283,6 +317,23 @@ set_static_uniforms:
     call qword [glUniform1i]
 .skip_albedo:
 
+    ; uShadowMap = 1
+    mov  ecx, [shader_prog + SP_ID]
+    lea  rdx, [u_shadow_map_name]
+    call qword [glGetUniformLocation]
+    cmp  eax, -1
+    je   .skip_shadow
+    mov  ecx, eax
+    mov  edx, 1
+    call qword [glUniform1i]
+.skip_shadow:
+
+    ; uShadowEnabled = 1
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_shadow_en_name]
+    movss xmm2, [f_1_0]
+    call shader_set_float
+
     ; uUnlit = 0
     lea  rcx, [shader_prog]
     lea  rdx, [u_unlit_name]
@@ -290,6 +341,44 @@ set_static_uniforms:
     call shader_set_float
 
 .done:
+    add  rsp, 0x28
+    ret
+
+; ============================================================
+; compute_light_view_proj()  — builds mat_light_vp = proj * view
+; ============================================================
+compute_light_view_proj:
+    sub  rsp, 0x28
+
+    ; ---- light view ----
+    lea  rcx, [mat_light_view]
+    movss xmm0, [light_eye + 0]
+    movss xmm1, [light_eye + 4]
+    movss xmm2, [light_eye + 8]
+    movss xmm3, [light_center + 0]
+    movss xmm4, [light_center + 4]
+    movss xmm5, [light_center + 8]
+    movss xmm6, [light_up + 0]
+    movss xmm7, [light_up + 4]
+    movss xmm8, [light_up + 8]
+    call mat4_make_look_at
+
+    ; ---- light ortho proj ----
+    lea  rcx, [mat_light_proj]
+    movss xmm0, [light_left]
+    movss xmm1, [light_right]
+    movss xmm2, [light_bottom]
+    movss xmm3, [light_top]
+    movss xmm4, [light_near]
+    movss xmm5, [light_far]
+    call mat4_make_ortho
+
+    ; ---- light_vp = proj * view ----
+    lea  rcx, [mat_light_vp]
+    lea  rdx, [mat_light_proj]
+    lea  r8,  [mat_light_view]
+    call mat4_mul
+
     add  rsp, 0x28
     ret
 
@@ -308,7 +397,6 @@ update_lights:
     fstp dword [rsp+0x00]
     fstp dword [rsp+0x04]
 
-    ; lightA: (+cos*r, y, +sin*r)
     movss xmm0, [rsp+0x00]
     mulss xmm0, [light_orbit_radius]
     movss [lightA_pos + 0], xmm0
@@ -320,7 +408,6 @@ update_lights:
     mulss xmm0, [light_orbit_radius]
     movss [lightA_pos + 8], xmm0
 
-    ; lightB: (-cos*r, y, -sin*r)
     movss xmm0, [rsp+0x00]
     xorps xmm1, xmm1
     subss xmm1, xmm0
@@ -357,18 +444,15 @@ spawn_at_camera:
     fstp dword [rsp+0x08]
     fstp dword [rsp+0x0C]
 
-    ; fwd.x = -sin_yaw * cos_pitch
     movss xmm0, [rsp+0x04]
     mulss xmm0, [rsp+0x08]
     xorps xmm1, xmm1
     subss xmm1, xmm0
     movss [spawn_fwd + 0], xmm1
 
-    ; fwd.y = sin_pitch
     movss xmm0, [rsp+0x0C]
     movss [spawn_fwd + 4], xmm0
 
-    ; fwd.z = -cos_yaw * cos_pitch
     movss xmm0, [rsp+0x00]
     mulss xmm0, [rsp+0x08]
     xorps xmm1, xmm1
@@ -492,7 +576,6 @@ draw_crosshair:
     lea  r8,  [mat_identity]
     call shader_set_mat4
 
-    ; uUnlit = 1
     lea  rcx, [shader_prog]
     lea  rdx, [u_unlit_name]
     movss xmm2, [f_1_0]
@@ -501,7 +584,6 @@ draw_crosshair:
     lea  rcx, [crosshair_mesh]
     call mesh_draw
 
-    ; uUnlit = 0
     lea  rcx, [shader_prog]
     lea  rdx, [u_unlit_name]
     xorps xmm2, xmm2
@@ -511,6 +593,126 @@ draw_crosshair:
     call glEnable
 
     add  rsp, 0x28
+    ret
+
+; ============================================================
+; render_shadow_pass — depth-only render into shadow_fb
+; ============================================================
+render_shadow_pass:
+    push rbx
+    push r12
+    sub  rsp, 0x28
+
+    lea  rcx, [shadow_fb]
+    call framebuffer_bind
+
+    xor  ecx, ecx
+    xor  edx, edx
+    mov  r8d, SHADOW_W
+    mov  r9d, SHADOW_H
+    call glViewport
+
+    mov  ecx, GL_DEPTH_BUFFER_BIT
+    call glClear
+
+    lea  rcx, [shadow_prog]
+    call shader_program_use
+
+    ; ---- for each entity: lightMVP = lightVP * model ----
+    lea  rbx, [entities]
+    mov  r12d, MAX_ENTITIES
+
+.sloop:
+    cmp  dword [rbx + E_TYPE], E_TYPE_EMPTY
+    je   .snext
+
+    ; model = T * R
+    lea  rcx, [mat_tmp]
+    movss xmm0, [rbx + E_POS + 0]
+    movss xmm1, [rbx + E_POS + 4]
+    movss xmm2, [rbx + E_POS + 8]
+    call mat4_make_translate
+
+    cmp  dword [rbx + E_TYPE], E_TYPE_SPHERE
+    je   .ssphere
+
+    lea  rcx, [mat_tmp2]
+    movss xmm0, [rbx + E_ROT_Y]
+    call mat4_make_rotate_y
+    jmp  .srot_done
+
+.ssphere:
+    lea  rcx, [mat_scratch]
+    movss xmm0, [rbx + E_ROT_X]
+    call mat4_make_rotate_x
+
+    lea  rcx, [mat_tmp2]
+    movss xmm0, [rbx + E_ROT_Z]
+    call mat4_make_rotate_z
+
+    lea  rcx, [mat_scratch]
+    lea  rdx, [mat_scratch]
+    lea  r8,  [mat_tmp2]
+    call mat4_mul
+
+    movups xmm0, [mat_scratch +  0]
+    movups xmm1, [mat_scratch + 16]
+    movups xmm2, [mat_scratch + 32]
+    movups xmm3, [mat_scratch + 48]
+    movups [mat_tmp2 +  0], xmm0
+    movups [mat_tmp2 + 16], xmm1
+    movups [mat_tmp2 + 32], xmm2
+    movups [mat_tmp2 + 48], xmm3
+
+.srot_done:
+    lea  rcx, [mat_model]
+    lea  rdx, [mat_tmp]
+    lea  r8,  [mat_tmp2]
+    call mat4_mul
+
+    ; lightMVP = lightVP * model
+    lea  rcx, [mat_light_mvp]
+    lea  rdx, [mat_light_vp]
+    lea  r8,  [mat_model]
+    call mat4_mul
+
+    lea  rcx, [shadow_prog]
+    lea  rdx, [u_light_mvp_name]
+    lea  r8,  [mat_light_mvp]
+    call shader_set_mat4
+
+    ; dispatch draw
+    mov  eax, [rbx + E_TYPE]
+    cmp  eax, E_TYPE_CUBE
+    je   .sdraw_cube
+    cmp  eax, E_TYPE_SPHERE
+    je   .sdraw_sphere
+    cmp  eax, E_TYPE_PYRAMID
+    je   .sdraw_pyramid
+    jmp  .snext
+
+.sdraw_cube:
+    lea  rcx, [cube_mesh]
+    call mesh_draw
+    jmp  .snext
+.sdraw_sphere:
+    lea  rcx, [sphere_mesh]
+    call mesh_draw
+    jmp  .snext
+.sdraw_pyramid:
+    lea  rcx, [pyramid_mesh]
+    call mesh_draw
+
+.snext:
+    add  rbx, ENTITY_SIZE
+    dec  r12d
+    jnz  .sloop
+
+    call framebuffer_unbind
+
+    add  rsp, 0x28
+    pop  r12
+    pop  rbx
     ret
 
 ; ============================================================
@@ -611,6 +813,8 @@ WinMain:
 
 .exit:
     call image_shutdown
+    lea  rcx, [shadow_fb]
+    call framebuffer_destroy
     lea  rcx, [crosshair_mesh]
     call mesh_destroy
     lea  rcx, [tex_slot1]
@@ -623,6 +827,8 @@ WinMain:
     call mesh_destroy
     lea  rcx, [cube_mesh]
     call mesh_destroy
+    lea  rcx, [shadow_prog]
+    call shader_program_destroy
     lea  rcx, [shader_prog]
     call shader_program_destroy
     call input_disable_mouse_look
@@ -723,6 +929,7 @@ renderer_init:
     push r12
     sub  rsp, 0x28
 
+    ; ---- paths ----
     lea  rcx, [rel_vs_path]
     lea  rdx, [abs_vs_path]
     mov  r8d, 260
@@ -733,6 +940,17 @@ renderer_init:
     mov  r8d, 260
     call path_join_exe
 
+    lea  rcx, [rel_shadow_vs]
+    lea  rdx, [abs_shadow_vs]
+    mov  r8d, 260
+    call path_join_exe
+
+    lea  rcx, [rel_shadow_fs]
+    lea  rdx, [abs_shadow_fs]
+    mov  r8d, 260
+    call path_join_exe
+
+    ; ---- main program ----
     lea  rcx, [shader_prog]
     lea  rdx, [abs_vs_path]
     lea  r8,  [abs_fs_path]
@@ -745,20 +963,25 @@ renderer_init:
     call set_static_uniforms
 
 .no_shader:
+    ; ---- shadow program ----
+    lea  rcx, [shadow_prog]
+    lea  rdx, [abs_shadow_vs]
+    lea  r8,  [abs_shadow_fs]
+    call shader_program_init
+
+    ; ---- meshes ----
     lea  rcx, [cube_mesh]
     call mesh_create_cube
-
     lea  rcx, [sphere_mesh]
     mov  edx, 32
     mov  r8d, 24
     call mesh_create_sphere
-
     lea  rcx, [pyramid_mesh]
     call mesh_create_pyramid
-
     lea  rcx, [crosshair_mesh]
     call mesh_create_crosshair
 
+    ; ---- textures ----
     lea  rcx, [rel_png_a]
     lea  rdx, [abs_png_a]
     mov  r8d, 260
@@ -769,20 +992,27 @@ renderer_init:
     call texture_create_from_file
     test eax, eax
     jnz  .png_ok
-
     lea  rcx, [tex_slot0]
     mov  edx, 16
     mov  r8d, 8
     call texture_create_checkerboard
-
 .png_ok:
     lea  rcx, [tex_slot1]
     mov  edx, 32
     mov  r8d, 4
     call texture_create_checkerboard
 
-    call entity_init
+    ; ---- shadow framebuffer ----
+    lea  rcx, [shadow_fb]
+    mov  edx, SHADOW_W
+    mov  r8d, SHADOW_H
+    call framebuffer_create_shadow
 
+    ; ---- light matrices ----
+    call compute_light_view_proj
+
+    ; ---- entities ----
+    call entity_init
     xorps xmm0, xmm0
     movss [light_angle], xmm0
 
@@ -791,7 +1021,6 @@ renderer_init:
 
 .spawn_loop:
     mov  eax, [rbx + 0]
-
     mov  ecx, [rbx + 4]
     test ecx, ecx
     jnz  .use_slot1
@@ -808,7 +1037,6 @@ renderer_init:
     movss xmm4, [rbx + 24]
     movss xmm5, [rbx + 28]
     movss xmm6, [rbx + 32]
-
     xorps xmm7, xmm7
     xorps xmm8, xmm8
     xorps xmm9, xmm9
@@ -820,7 +1048,6 @@ renderer_init:
     cmp  eax, E_TYPE_PYRAMID
     je   .spawn_pyramid
     jmp  .spawn_next
-
 .spawn_cube:
     call entity_spawn_cube
     jmp  .spawn_next
@@ -855,6 +1082,20 @@ renderer_draw:
     push r12
     sub  rsp, 0x28
 
+    ; =========================================================
+    ; PASS 1: shadow map
+    ; =========================================================
+    call render_shadow_pass
+
+    ; =========================================================
+    ; PASS 2: main
+    ; =========================================================
+    xor  ecx, ecx
+    xor  edx, edx
+    mov  r8d, 800
+    mov  r9d, 600
+    call glViewport
+
     lea  rax, [shader_prog]
     cmp  dword [rax+SP_ID], 0
     jne  .do_draw
@@ -878,6 +1119,10 @@ renderer_draw:
     call set_static_uniforms
 .no_reload:
 
+    ; use main shader + clear
+    lea  rcx, [shader_prog]
+    call shader_program_use
+
     movss xmm0, [bg_rgb]
     movss xmm1, [bg_rgb]
     movss xmm2, [bg_rgb]
@@ -885,6 +1130,16 @@ renderer_draw:
     call glClearColor
     mov  ecx, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
     call glClear
+
+    ; bind shadow map on unit 1
+    mov  eax, [shadow_fb + FB_DEPTH_TEX]
+    mov  [rsp+0x10], eax
+    mov  dword [rsp+0x14], 0
+    mov  dword [rsp+0x18], 0
+    mov  dword [rsp+0x1C], 0
+    lea  rcx, [rsp+0x10]
+    mov  edx, 0x84C1              ; GL_TEXTURE1
+    call texture_bind
 
     ; camera position
     call camera_get_pos
@@ -898,18 +1153,16 @@ renderer_draw:
     lea  rdx, [u_lightA_pos_name]
     lea  r8,  [lightA_pos]
     call shader_set_vec3
-
     lea  rcx, [shader_prog]
     lea  rdx, [u_lightB_pos_name]
     lea  r8,  [lightB_pos]
     call shader_set_vec3
 
+    ; camera matrices
     lea  rcx, [mat_proj]
     call camera_get_proj
-
     lea  rcx, [mat_view]
     call camera_get_view
-
     lea  rcx, [mat_pv]
     lea  rdx, [mat_proj]
     lea  r8,  [mat_view]
@@ -938,6 +1191,12 @@ renderer_draw:
     lea  r8,  [mat_model]
     call mat4_mul
 
+    ; lightMVP = lightVP * model (for shadow lookup)
+    lea  rcx, [mat_light_mvp]
+    lea  rdx, [mat_light_vp]
+    lea  r8,  [mat_model]
+    call mat4_mul
+
     mov  eax, [tex_slot1 + TEX_ID]
     mov  [rsp+0x10], eax
     mov  dword [rsp+0x14], 0
@@ -955,6 +1214,11 @@ renderer_draw:
     lea  rcx, [shader_prog]
     lea  rdx, [u_model_name]
     lea  r8,  [mat_model]
+    call shader_set_mat4
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_light_mvp_name]
+    lea  r8,  [mat_light_mvp]
     call shader_set_mat4
 
     lea  rcx, [shader_prog]
@@ -991,16 +1255,13 @@ renderer_draw:
     lea  rcx, [mat_scratch]
     movss xmm0, [rbx + E_ROT_X]
     call mat4_make_rotate_x
-
     lea  rcx, [mat_tmp2]
     movss xmm0, [rbx + E_ROT_Z]
     call mat4_make_rotate_z
-
     lea  rcx, [mat_scratch]
     lea  rdx, [mat_scratch]
     lea  r8,  [mat_tmp2]
     call mat4_mul
-
     movups xmm0, [mat_scratch +  0]
     movups xmm1, [mat_scratch + 16]
     movups xmm2, [mat_scratch + 32]
@@ -1018,6 +1279,11 @@ renderer_draw:
 
     lea  rcx, [mat_mvp]
     lea  rdx, [mat_pv]
+    lea  r8,  [mat_model]
+    call mat4_mul
+
+    lea  rcx, [mat_light_mvp]
+    lea  rdx, [mat_light_vp]
     lea  r8,  [mat_model]
     call mat4_mul
 
@@ -1044,6 +1310,11 @@ renderer_draw:
     call shader_set_mat4
 
     lea  rcx, [shader_prog]
+    lea  rdx, [u_light_mvp_name]
+    lea  r8,  [mat_light_mvp]
+    call shader_set_mat4
+
+    lea  rcx, [shader_prog]
     lea  rdx, [u_color_name]
     lea  r8,  [rbx + E_COLOR]
     call shader_set_vec3
@@ -1056,7 +1327,6 @@ renderer_draw:
     cmp  eax, E_TYPE_PYRAMID
     je   .draw_pyramid
     jmp  .entity_next
-
 .draw_cube:
     lea  rcx, [cube_mesh]
     call mesh_draw

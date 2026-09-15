@@ -1,10 +1,13 @@
 ; ============================================================
 ; src/render/shader.asm
 ; Shader programs: compile, link, hot reload, set uniforms
-; Win64 ABI: floats go in XMM# where # == argument position
-;   glUniform1f(loc, v0)          → v0 in XMM1 (position 2)
-;   glUniform3fv(loc, n, ptr)     → all int/ptr, no XMM
-;   glUniformMatrix4fv(loc, n, t, ptr) → all int/ptr, no XMM
+;
+; Win64 ABI notes:
+;   glGetShaderInfoLog/glGetProgramInfoLog signature:
+;     (GLuint obj, GLsizei maxLen, GLsizei* length, GLchar* infoLog)
+;     rcx=obj, rdx=maxLen, r8=length, r9=infoLog
+;   glUniform1f(loc, v0): v0 is in XMM1 (arg position 2)
+;   glUniform3fv / glUniformMatrix4fv: all-int/ptr, no XMM
 ; ============================================================
 BITS 64
 default rel
@@ -76,6 +79,9 @@ shader_show_error:
 
 ; ============================================================
 ; shader_compile(src, type, path) → eax = id (0 on fail)
+;   rcx = source string
+;   edx = GL_VERTEX_SHADER or GL_FRAGMENT_SHADER
+;   r8  = path (for error msg)
 ; ============================================================
 shader_compile:
     push rbx
@@ -83,15 +89,15 @@ shader_compile:
     push rdi
     sub  rsp, 0x830
 
-    mov  rbx, rcx
-    mov  rsi, r8
-    mov  edi, edx
+    mov  rbx, rcx                  ; src
+    mov  rsi, r8                   ; path
+    mov  edi, edx                  ; type
 
     mov  ecx, edi
     call qword [glCreateShader]
     test eax, eax
     jz   .fail
-    mov  edi, eax
+    mov  edi, eax                  ; edi = shader id
 
     mov  [rsp+0x10], rbx
     mov  rcx, rdi
@@ -111,7 +117,7 @@ shader_compile:
     test eax, eax
     jnz  .ok
 
-    ; fetch log
+    ; ---- fetch log ----
     mov  rcx, rdi
     mov  edx, GL_INFO_LOG_LENGTH
     lea  r8,  [rsp+0x0C]
@@ -124,14 +130,19 @@ shader_compile:
     mov  eax, 2048
 .log_len_ok:
     mov  [rsp+0x18], eax
+
+    ; ---- glGetShaderInfoLog(id, maxLen, NULL, buf) ----
+    ;   rcx=id, rdx=maxLen, r8=NULL(length), r9=buffer
     mov  rcx, rdi
     mov  edx, eax
-    lea  r8,  [rsp+0x20]
-    xor  r9d, r9d
+    xor  r8d, r8d
+    lea  r9,  [rsp+0x20]
     call qword [glGetShaderInfoLog]
+
     mov  eax, [rsp+0x18]
     dec  eax
     mov  byte [rsp+0x20+rax], 0
+
     mov  rcx, rsi
     lea  rdx, [rsp+0x20]
     call shader_show_error
@@ -163,6 +174,7 @@ shader_compile:
 
 ; ============================================================
 ; shader_link(vs_id, fs_id) → eax = program id (0 on fail)
+;   ecx = vs, edx = fs
 ; ============================================================
 shader_link:
     push rbx
@@ -196,6 +208,7 @@ shader_link:
     test eax, eax
     jnz  .ok
 
+    ; ---- fetch log ----
     mov  rcx, rdi
     mov  edx, GL_INFO_LOG_LENGTH
     lea  r8,  [rsp+0x0C]
@@ -208,14 +221,19 @@ shader_link:
     mov  eax, 2048
 .log_len_ok:
     mov  [rsp+0x18], eax
+
+    ; ---- glGetProgramInfoLog(id, maxLen, NULL, buf) ----
+    ;   rcx=id, rdx=maxLen, r8=NULL(length), r9=buffer
     mov  rcx, rdi
     mov  edx, eax
-    lea  r8,  [rsp+0x20]
-    xor  r9d, r9d
+    xor  r8d, r8d
+    lea  r9,  [rsp+0x20]
     call qword [glGetProgramInfoLog]
+
     mov  eax, [rsp+0x18]
     dec  eax
     mov  byte [rsp+0x20+rax], 0
+
     xor  ecx, ecx
     lea  rdx, [rsp+0x20]
     call shader_show_error
@@ -408,8 +426,6 @@ shader_program_init:
     ret
 
 ; ============================================================
-; shader_program_hot_reload(sp) → eax = 1 if reloaded
-; ============================================================
 shader_program_hot_reload:
     push rbx
     sub  rsp, 0x20
@@ -449,7 +465,7 @@ shader_program_hot_reload:
     ret
 
 ; ============================================================
-shader_program_use:                ; rcx = sp
+shader_program_use:
     mov  ecx, [rcx+SP_ID]
     test ecx, ecx
     jz   .skip
@@ -458,7 +474,7 @@ shader_program_use:                ; rcx = sp
     ret
 
 ; ============================================================
-shader_program_destroy:            ; rcx = sp
+shader_program_destroy:
     push rbx
     sub  rsp, 0x20
     mov  rbx, rcx
@@ -488,7 +504,7 @@ shader_program_destroy:            ; rcx = sp
 
 ; ============================================================
 ; shader_set_mat4(sp, name, const float* mat)
-;   glUniformMatrix4fv(loc, 1, GL_FALSE, ptr) — all int/ptr
+;   glUniformMatrix4fv(loc, 1, GL_FALSE, ptr)
 ; ============================================================
 shader_set_mat4:
     push rbx
@@ -512,7 +528,7 @@ shader_set_mat4:
 
 ; ============================================================
 ; shader_set_vec3(sp, name, const float* v)
-;   glUniform3fv(loc, 1, ptr) — all int/ptr
+;   glUniform3fv(loc, 1, ptr)
 ; ============================================================
 shader_set_vec3:
     push rbx
@@ -533,17 +549,15 @@ shader_set_vec3:
     pop  rbx
     ret
 
-
 ; ============================================================
 ; shader_set_float(sp, name, float value)
 ;   rcx = sp, rdx = name, xmm2 = value
-;   glUniform1f(loc, v0): v0 at position 2 → XMM1
-;   Save value OUTSIDE shadow space
+;   glUniform1f(loc, v0): v0 at arg position 2 → XMM1
 ; ============================================================
 shader_set_float:
     push rbx
-    sub  rsp, 0x28                 ; 32 shadow + 8 for value
-    movss [rsp+0x20], xmm2         ; save OUTSIDE shadow
+    sub  rsp, 0x28
+    movss [rsp+0x20], xmm2
     mov  rbx, rdx
     mov  ecx, [rcx+SP_ID]
     test ecx, ecx
@@ -553,7 +567,7 @@ shader_set_float:
     cmp  eax, -1
     je   .done
     mov  ecx, eax
-    movss xmm1, [rsp+0x20]         ; v0 in XMM1
+    movss xmm1, [rsp+0x20]
     call qword [glUniform1f]
 .done:
     add  rsp, 0x28

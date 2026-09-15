@@ -35,6 +35,7 @@ global glGetUniformLocation
 global glUniformMatrix4fv
 global glUniform1f
 global glUniform3f
+global glUniform3fv
 global glUniform4f
 global glUniform1i
 
@@ -52,8 +53,15 @@ global glVertexAttribPointer
 global glEnableVertexAttribArray
 global glDisableVertexAttribArray
 
-; ---- Texture functions (loaded, not directly exported) ----
+; ---- Texture functions ----
 global glActiveTexture
+
+; ---- Framebuffer functions (for shadow mapping) ----
+global glGenFramebuffers
+global glBindFramebuffer
+global glFramebufferTexture2D
+global glCheckFramebufferStatus
+global glDeleteFramebuffers
 
 ; ---- Draw calls ----
 global glDrawArrays
@@ -78,6 +86,7 @@ glGetUniformLocation      resq 1
 glUniformMatrix4fv        resq 1
 glUniform1f               resq 1
 glUniform3f               resq 1
+glUniform3fv              resq 1
 glUniform4f               resq 1
 glUniform1i               resq 1
 
@@ -94,6 +103,12 @@ glEnableVertexAttribArray resq 1
 glDisableVertexAttribArray resq 1
 
 glActiveTexture           resq 1
+
+glGenFramebuffers         resq 1
+glBindFramebuffer         resq 1
+glFramebufferTexture2D    resq 1
+glCheckFramebufferStatus  resq 1
+glDeleteFramebuffers      resq 1
 
 glDrawArrays              resq 1
 glDrawElements            resq 1
@@ -119,6 +134,7 @@ n_GetUniformLocation      db "glGetUniformLocation",0
 n_UniformMatrix4fv        db "glUniformMatrix4fv",0
 n_Uniform1f               db "glUniform1f",0
 n_Uniform3f               db "glUniform3f",0
+n_Uniform3fv              db "glUniform3fv",0
 n_Uniform4f               db "glUniform4f",0
 n_Uniform1i               db "glUniform1i",0
 
@@ -136,11 +152,16 @@ n_DisableVertexAttribArray db "glDisableVertexAttribArray",0
 
 n_ActiveTexture           db "glActiveTexture",0
 
+n_GenFramebuffers         db "glGenFramebuffers",0
+n_BindFramebuffer         db "glBindFramebuffer",0
+n_FramebufferTexture2D    db "glFramebufferTexture2D",0
+n_CheckFramebufferStatus  db "glCheckFramebufferStatus",0
+n_DeleteFramebuffers      db "glDeleteFramebuffers",0
+
 n_DrawArrays              db "glDrawArrays",0
 n_DrawElements            db "glDrawElements",0
 
 align 8
-; ---- Table of { name_ptr, storage_ptr } pairs ----
 func_table:
     dq n_CreateShader,            glCreateShader
     dq n_ShaderSource,            glShaderSource
@@ -161,6 +182,7 @@ func_table:
     dq n_UniformMatrix4fv,        glUniformMatrix4fv
     dq n_Uniform1f,               glUniform1f
     dq n_Uniform3f,               glUniform3f
+    dq n_Uniform3fv,              glUniform3fv
     dq n_Uniform4f,               glUniform4f
     dq n_Uniform1i,               glUniform1i
 
@@ -178,10 +200,16 @@ func_table:
 
     dq n_ActiveTexture,           glActiveTexture
 
+    dq n_GenFramebuffers,         glGenFramebuffers
+    dq n_BindFramebuffer,         glBindFramebuffer
+    dq n_FramebufferTexture2D,    glFramebufferTexture2D
+    dq n_CheckFramebufferStatus,  glCheckFramebufferStatus
+    dq n_DeleteFramebuffers,      glDeleteFramebuffers
+
     dq n_DrawArrays,              glDrawArrays
     dq n_DrawElements,            glDrawElements
 
-    dq 0, 0                       ; terminator
+    dq 0, 0
 
 ; ============================================================
 section .text
@@ -222,5 +250,5 @@ gl_load_functions:
     xor  eax, eax
     add  rsp, 0x20
     pop  rsi
-  pop  rbx
+    pop  rbx
     ret
