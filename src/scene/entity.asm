@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/scene/entity.asm
-; Entity slots + spawn/destroy + gravity + ground + friction
+; Entity slots + spawn/destroy + gravity + ground + collisions
 ; ============================================================
 BITS 64
 default rel
@@ -10,15 +10,15 @@ default rel
 section .data
 align 16
 gravity:        dd 9.8
-ground_y:       dd -4.0             ; top surface of ground plane
-restitution:    dd 0.35             ; more realistic than 0.45
+ground_y:       dd -4.0
+restitution:    dd 0.35
 min_vy:         dd 0.3
-friction:       dd 2.5              ; horizontal damping while grounded (1/s)
+friction:       dd 2.5
 f_one:          dd 1.0
+f_half:         dd 0.5
+f_neg_three_q:  dd -0.75              ; impulse factor -(1+e)/2 with e=0.5
+f_epsilon_sq:   dd 0.000001
 abs_mask:       dd 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF
-hh_cube:        dd 0.5
-hh_sphere:      dd 1.0
-hh_pyramid:     dd 0.5
 
 section .bss
 align 16
@@ -59,20 +59,17 @@ entity_spawn_pyramid:
 
 ; ============================================================
 ; entity_spawn_internal
-;   ecx = type
-;   edx = texture id
-;   xmm0..xmm2 = position
-;   xmm3 = rot_speed
-;   xmm4..xmm6 = color
-;   xmm7..xmm9 = initial velocity
-; Returns: rax = index or -1
+;   ecx = type, edx = texture id
+;   xmm0..2 = pos, xmm3 = rot_speed, xmm4..6 = color
+;   xmm7..9 = velocity
+; Returns rax = index or -1
 ; ============================================================
 entity_spawn_internal:
     push rbx
     sub  rsp, 0x30
 
-    mov  r8d, ecx                  ; type
-    mov  r9d, edx                  ; texture
+    mov  r8d, ecx
+    mov  r9d, edx
 
     movss [rsp+0x00], xmm0
     movss [rsp+0x04], xmm1
@@ -116,7 +113,7 @@ entity_spawn_internal:
     movss xmm0, [rsp+0x0C]
     movss [rbx + E_ROT_SPEED], xmm0
 
-    mov  eax, 0x3F800000
+    mov  eax, 0x3F800000           ; 1.0f (scale)
     mov  dword [rbx + E_SCALE], eax
 
     movss xmm0, [rsp+0x10]
@@ -135,17 +132,13 @@ entity_spawn_internal:
     movss xmm0, [rsp+0x24]
     movss [rbx + E_VEL + 8], xmm0
 
-    ; ---- half-height per type ----
+    ; E_HALF_H (also the collision radius)
+    mov  eax, 0x3F000000           ; 0.5f (cube / pyramid)
     cmp  r8d, E_TYPE_SPHERE
-    je   .hh_sphere
-    ; cube and pyramid → 0.5
-    movss xmm0, [hh_cube]
-    movss [rbx + E_HALF_H], xmm0
-    jmp  .hh_done
-.hh_sphere:
-    movss xmm0, [hh_sphere]
-    movss [rbx + E_HALF_H], xmm0
-.hh_done:
+    jne  .hh_set
+    mov  eax, 0x3F800000           ; 1.0f (sphere)
+.hh_set:
+    mov  dword [rbx + E_HALF_H], eax
 
     lea  rcx, [entities]
     mov  rax, rbx
@@ -185,9 +178,8 @@ entity_destroy_last:
 
 ; ============================================================
 ; entity_update_all(dt)  ; xmm0 = dt
-; ============================================================
-; ============================================================
-; entity_update_all(dt)  ; xmm0 = dt
+;   Pass 1: rotation + gravity + integrate + ground + friction
+;   Pass 2: entity-entity collisions
 ; ============================================================
 entity_update_all:
     push rbx
@@ -196,8 +188,7 @@ entity_update_all:
 
     movss [rsp], xmm0              ; dt
 
-    ; Load abs_mask once into xmm15 (movups — no alignment required)
-    movups xmm15, [abs_mask]
+    movups xmm15, [abs_mask]       ; for andps (register-register only)
 
     lea  rbx, [entities]
     mov  r12d, MAX_ENTITIES
@@ -235,7 +226,7 @@ entity_update_all:
     addss xmm0, [rbx + E_POS + 8]
     movss [rbx + E_POS + 8], xmm0
 
-    ; ---- ground collision ----
+    ; ---- ground ----
     movss xmm1, [ground_y]
     addss xmm1, [rbx + E_HALF_H]
 
@@ -243,26 +234,22 @@ entity_update_all:
     comiss xmm0, xmm1
     jae  .next
 
-    ; ---- ON GROUND: snap ----
     movss [rbx + E_POS + 4], xmm1
 
-    ; vel.y = -vel.y * restitution
     movss xmm0, [rbx + E_VEL + 4]
     xorps xmm2, xmm2
     subss xmm2, xmm0
     mulss xmm2, [restitution]
     movss [rbx + E_VEL + 4], xmm2
 
-    ; if |vel.y| < min_vy → vel.y = 0
     movaps xmm3, xmm2
-    andps  xmm3, xmm15             ; ← use xmm15 (movaps reg-reg is fine)
+    andps  xmm3, xmm15
     movss  xmm4, [min_vy]
     comiss xmm3, xmm4
     jae  .friction
     mov  dword [rbx + E_VEL + 4], 0
 
 .friction:
-    ; factor = max(0, 1 - friction * dt)
     movss xmm5, [friction]
     mulss xmm5, [rsp]
     movss xmm6, [f_one]
@@ -270,17 +257,14 @@ entity_update_all:
     xorps xmm7, xmm7
     maxss xmm6, xmm7
 
-    ; vel.x *= factor
     movss xmm0, [rbx + E_VEL + 0]
     mulss xmm0, xmm6
     movss [rbx + E_VEL + 0], xmm0
 
-    ; vel.z *= factor
     movss xmm0, [rbx + E_VEL + 8]
     mulss xmm0, xmm6
     movss [rbx + E_VEL + 8], xmm0
 
-    ; if |vel.x| and |vel.z| both < min_vy → damp rotation too
     movss xmm0, [rbx + E_VEL + 0]
     andps xmm0, xmm15
     movss xmm1, [min_vy]
@@ -292,7 +276,6 @@ entity_update_all:
     comiss xmm0, xmm1
     jae  .next
 
-    ; rotation speed *= factor
     movss xmm0, [rbx + E_ROT_SPEED]
     mulss xmm0, xmm6
     movss [rbx + E_ROT_SPEED], xmm0
@@ -302,7 +285,228 @@ entity_update_all:
     dec  r12d
     jnz  .loop
 
+    ; ---- Pass 2: entity-entity collision ----
+    call entity_resolve_collisions
+
     add  rsp, 0x28
     pop  r12
     pop  rbx
+    ret
+
+; ============================================================
+; entity_resolve_collisions — O(n²) sphere-sphere pairs
+;   For each (i, j) with i < j:
+;     if dist < r_i + r_j → push apart + apply impulse
+; ============================================================
+entity_resolve_collisions:
+    push rbp
+    push r12
+    push r13
+    push r14
+    push r15
+    sub  rsp, 0x30
+
+    ; stack layout:
+    ;   [rsp+0x00..0x0B] : n (nx, ny, nz)
+    ;   [rsp+0x0C]       : dist
+    ;   [rsp+0x10]       : half_penetration
+
+    mov  r13d, MAX_ENTITIES
+    lea  r14, [entities]
+    xor  r12d, r12d
+
+.outer:
+    cmp  r12d, r13d
+    jae  .outer_done
+
+    cmp  dword [r14 + E_TYPE], E_TYPE_EMPTY
+    je   .outer_next
+
+    lea  r15, [r14 + ENTITY_SIZE]
+    lea  ebp, [r12d + 1]
+
+.inner:
+    cmp  ebp, r13d
+    jae  .outer_next
+
+    cmp  dword [r15 + E_TYPE], E_TYPE_EMPTY
+    je   .inner_next
+
+    ; ---- dx, dy, dz ----
+    movss xmm0, [r15 + E_POS + 0]
+    subss xmm0, [r14 + E_POS + 0]
+    movss [rsp+0x00], xmm0
+
+    movss xmm1, [r15 + E_POS + 4]
+    subss xmm1, [r14 + E_POS + 4]
+    movss [rsp+0x04], xmm1
+
+    movss xmm2, [r15 + E_POS + 8]
+    subss xmm2, [r14 + E_POS + 8]
+    movss [rsp+0x08], xmm2
+
+    ; ---- dist_sq ----
+    movaps xmm3, xmm0
+    mulss  xmm3, xmm3
+    movaps xmm4, xmm1
+    mulss  xmm4, xmm4
+    addss  xmm3, xmm4
+    movaps xmm4, xmm2
+    mulss  xmm4, xmm4
+    addss  xmm3, xmm4
+
+    ; ---- r_sum² ----
+    movss xmm4, [r14 + E_HALF_H]
+    addss xmm4, [r15 + E_HALF_H]
+    mulss xmm4, xmm4
+
+    comiss xmm3, xmm4
+    jae  .inner_next
+
+    ; safety: dist_sq > epsilon
+    movss xmm5, [f_epsilon_sq]
+    comiss xmm3, xmm5
+    jb   .inner_next
+
+    ; ---- dist, inv_dist ----
+    sqrtss xmm5, xmm3
+    movss [rsp+0x0C], xmm5
+
+    movss xmm6, [f_one]
+    divss xmm6, xmm5               ; inv_dist
+
+    ; ---- normal = d * inv_dist ----
+    movss xmm7, [rsp+0x00]
+    mulss xmm7, xmm6
+    movss [rsp+0x00], xmm7
+
+    movss xmm7, [rsp+0x04]
+    mulss xmm7, xmm6
+    movss [rsp+0x04], xmm7
+
+    movss xmm7, [rsp+0x08]
+    mulss xmm7, xmm6
+    movss [rsp+0x08], xmm7
+
+    ; ---- half_penetration = (r_sum - dist) * 0.5 ----
+    movss xmm7, [r14 + E_HALF_H]
+    addss xmm7, [r15 + E_HALF_H]
+    subss xmm7, xmm5
+    mulss xmm7, [f_half]
+    movss [rsp+0x10], xmm7
+
+    ; ---- ei.pos -= n * half_pen ----
+    movss xmm7, [rsp+0x00]
+    mulss xmm7, [rsp+0x10]
+    movss xmm8, [r14 + E_POS + 0]
+    subss xmm8, xmm7
+    movss [r14 + E_POS + 0], xmm8
+
+    movss xmm7, [rsp+0x04]
+    mulss xmm7, [rsp+0x10]
+    movss xmm8, [r14 + E_POS + 4]
+    subss xmm8, xmm7
+    movss [r14 + E_POS + 4], xmm8
+
+    movss xmm7, [rsp+0x08]
+    mulss xmm7, [rsp+0x10]
+    movss xmm8, [r14 + E_POS + 8]
+    subss xmm8, xmm7
+    movss [r14 + E_POS + 8], xmm8
+
+    ; ---- ej.pos += n * half_pen ----
+    movss xmm7, [rsp+0x00]
+    mulss xmm7, [rsp+0x10]
+    movss xmm8, [r15 + E_POS + 0]
+    addss xmm8, xmm7
+    movss [r15 + E_POS + 0], xmm8
+
+    movss xmm7, [rsp+0x04]
+    mulss xmm7, [rsp+0x10]
+    movss xmm8, [r15 + E_POS + 4]
+    addss xmm8, xmm7
+    movss [r15 + E_POS + 4], xmm8
+
+    movss xmm7, [rsp+0x08]
+    mulss xmm7, [rsp+0x10]
+    movss xmm8, [r15 + E_POS + 8]
+    addss xmm8, xmm7
+    movss [r15 + E_POS + 8], xmm8
+
+    ; ---- v_rel = (v_j - v_i) · n ----
+    movss xmm0, [r15 + E_VEL + 0]
+    subss xmm0, [r14 + E_VEL + 0]
+    movss xmm1, [r15 + E_VEL + 4]
+    subss xmm1, [r14 + E_VEL + 4]
+    movss xmm2, [r15 + E_VEL + 8]
+    subss xmm2, [r14 + E_VEL + 8]
+
+    mulss xmm0, [rsp+0x00]
+    mulss xmm1, [rsp+0x04]
+    mulss xmm2, [rsp+0x08]
+    addss xmm0, xmm1
+    addss xmm0, xmm2
+
+    xorps xmm1, xmm1
+    comiss xmm0, xmm1
+    jae  .inner_next               ; separating
+
+    ; J = -0.75 * v_rel
+    mulss xmm0, [f_neg_three_q]
+
+    ; ---- ei.vel -= n * J ----
+    movss xmm7, [rsp+0x00]
+    mulss xmm7, xmm0
+    movss xmm8, [r14 + E_VEL + 0]
+    subss xmm8, xmm7
+    movss [r14 + E_VEL + 0], xmm8
+
+    movss xmm7, [rsp+0x04]
+    mulss xmm7, xmm0
+    movss xmm8, [r14 + E_VEL + 4]
+    subss xmm8, xmm7
+    movss [r14 + E_VEL + 4], xmm8
+
+    movss xmm7, [rsp+0x08]
+    mulss xmm7, xmm0
+    movss xmm8, [r14 + E_VEL + 8]
+    subss xmm8, xmm7
+    movss [r14 + E_VEL + 8], xmm8
+
+    ; ---- ej.vel += n * J ----
+    movss xmm7, [rsp+0x00]
+    mulss xmm7, xmm0
+    movss xmm8, [r15 + E_VEL + 0]
+    addss xmm8, xmm7
+    movss [r15 + E_VEL + 0], xmm8
+
+    movss xmm7, [rsp+0x04]
+    mulss xmm7, xmm0
+    movss xmm8, [r15 + E_VEL + 4]
+    addss xmm8, xmm7
+    movss [r15 + E_VEL + 4], xmm8
+
+    movss xmm7, [rsp+0x08]
+    mulss xmm7, xmm0
+    movss xmm8, [r15 + E_VEL + 8]
+    addss xmm8, xmm7
+    movss [r15 + E_VEL + 8], xmm8
+
+.inner_next:
+    add  r15, ENTITY_SIZE
+    inc  ebp
+    jmp  .inner
+
+.outer_next:
+    add  r14, ENTITY_SIZE
+    inc  r12d
+    jmp  .outer
+
+.outer_done:
+    add  rsp, 0x30
+    pop  r15
+    pop  r14
+    pop  r13
+    pop  r12
+    pop  rbp
     ret
