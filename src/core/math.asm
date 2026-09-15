@@ -399,3 +399,50 @@ vec3_normalize:
     movss [rcx+8], xmm1
 .zero:
     ret
+; ============================================================
+; void mat4_make_rotate_z(float* dst, float angle_rad)
+; ============================================================
+global mat4_make_rotate_z
+mat4_make_rotate_z:
+    sub  rsp, 0x18
+    movss [rsp], xmm0
+
+    fld  dword [rsp]
+    fsincos
+    fstp dword [rsp+4]            ; cos
+    fstp dword [rsp+8]            ; sin
+
+    movss xmm1, [rsp+4]           ; c
+    movss xmm2, [rsp+8]           ; s
+    xorps xmm3, xmm3
+    movss xmm6, [c_one]
+
+    ; col0: (c, s, 0, 0)
+    movss [rcx+0],  xmm1
+    movss [rcx+4],  xmm2
+    movss [rcx+8],  xmm3
+    movss [rcx+12], xmm3
+
+    ; col1: (-s, c, 0, 0)
+    movss xmm7, xmm2
+    xorps xmm5, xmm5
+    subss xmm5, xmm7              ; -s
+    movss [rcx+16], xmm5
+    movss [rcx+20], xmm1
+    movss [rcx+24], xmm3
+    movss [rcx+28], xmm3
+
+    ; col2: (0, 0, 1, 0)
+    movss [rcx+32], xmm3
+    movss [rcx+36], xmm3
+    movss [rcx+40], xmm6
+    movss [rcx+44], xmm3
+
+    ; col3: (0, 0, 0, 1)
+    movss [rcx+48], xmm3
+    movss [rcx+52], xmm3
+    movss [rcx+56], xmm3
+    movss [rcx+60], xmm6
+
+    add  rsp, 0x18
+    ret

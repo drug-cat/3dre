@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/main.asm
-; Physics demo: entities fall under gravity, bounce off ground
+; Physics + rolling spheres + unstable stacking
 ; ============================================================
 BITS 64
 default rel
@@ -50,7 +50,9 @@ extern cam_pitch
 
 extern mat4_mul
 extern mat4_make_translate
+extern mat4_make_rotate_x
 extern mat4_make_rotate_y
+extern mat4_make_rotate_z
 extern mat4_make_scale
 
 extern path_join_exe
@@ -107,7 +109,7 @@ global WinMain
 section .data
 align 16
 
-window_title db "3dre Physics | C/V/B=spawn  Del=remove  WASD+QE/RF=move",0
+window_title db "3dre | C/V/B=spawn  Del=remove  WASD+QE/RF=move",0
 rel_vs_path  db "shaders\basic.vert",0
 rel_fs_path  db "shaders\basic.frag",0
 rel_png_a    db "assets\test.png",0
@@ -133,27 +135,25 @@ ambient_level    dd 0.25
 spec_color       dd 1.0, 1.0, 1.0
 shininess        dd 64.0
 
-; ---- Ground settings ----
 ground_pos_y:    dd -4.05
 ground_scale_x:  dd 20.0
 ground_scale_y:  dd 0.1
 ground_scale_z:  dd 20.0
 ground_color:    dd 0.30, 0.32, 0.36
 
-; ---- Spawn velocity: forward * this ----
 spawn_forward_speed: dd 3.0
 
-; ---- Initial spawn: entities start above ground and fall ----
+; ---- Spawn table (36 bytes per entry) ----
 align 16
 spawn_list:
     dd E_TYPE_CUBE,    0,   -3.0,  2.0, -1.0,   0.8,   1.0, 1.0, 1.0
     dd E_TYPE_CUBE,    1,    3.0,  3.0, -1.0,   0.6,   0.3, 1.0, 0.3
     dd E_TYPE_PYRAMID, 0,   -3.0,  4.0,  1.0,   0.7,   1.0, 1.0, 1.0
     dd E_TYPE_PYRAMID, 1,    3.0,  2.5,  1.0,   0.5,   1.0, 1.0, 0.3
-    dd E_TYPE_SPHERE,  0,   -4.0,  5.0,  0.0,   0.9,   1.0, 1.0, 1.0
-    dd E_TYPE_SPHERE,  1,    0.0,  6.0,  0.0,   1.2,   0.9, 0.9, 0.95
-    dd E_TYPE_SPHERE,  0,    4.0,  3.5,  0.0,   0.9,   1.0, 1.0, 1.0
-    dd E_TYPE_SPHERE,  1,    0.0,  4.5,  0.0,   1.2,   0.5, 0.7, 1.0
+    dd E_TYPE_SPHERE,  0,   -4.0,  5.0,  0.0,   0.0,   1.0, 1.0, 1.0
+    dd E_TYPE_SPHERE,  1,    0.0,  6.0,  0.0,   0.0,   0.9, 0.9, 0.95
+    dd E_TYPE_SPHERE,  0,    4.0,  3.5,  0.0,   0.0,   1.0, 1.0, 1.0
+    dd E_TYPE_SPHERE,  1,    0.0,  4.5,  0.0,   0.0,   0.5, 0.7, 1.0
 
 NUM_SPAWNS equ 8
 SPAWN_SIZE equ 36
@@ -189,6 +189,7 @@ mat_view        resb 64
 mat_pv          resb 64
 mat_tmp         resb 64
 mat_tmp2        resb 64
+mat_scratch     resb 64
 mat_model       resb 64
 mat_mvp         resb 64
 
@@ -246,17 +247,16 @@ set_light_uniforms:
     ret
 
 ; ============================================================
-; spawn_at_camera(type)  — spawn 4 units ahead with forward velocity
-;   ecx = E_TYPE_*
+; spawn_at_camera(type)  ; ecx = E_TYPE_*
 ; ============================================================
 spawn_at_camera:
     push rbx
     push r12
     sub  rsp, 0x28
 
-    mov  r12d, ecx                 ; type
+    mov  r12d, ecx
 
-    ; ---- compute forward from cam_yaw, cam_pitch ----
+    ; forward vector from yaw/pitch
     fld  dword [cam_yaw]
     fsincos
     fstp dword [rsp+0x00]          ; cos_yaw
@@ -267,23 +267,20 @@ spawn_at_camera:
     fstp dword [rsp+0x08]          ; cos_pitch
     fstp dword [rsp+0x0C]          ; sin_pitch
 
-    ; fwd.x = sin_yaw * cos_pitch
     movss xmm0, [rsp+0x04]
     mulss xmm0, [rsp+0x08]
-    movss [spawn_fwd + 0], xmm0
+    movss [spawn_fwd + 0], xmm0    ; fwd.x
 
-    ; fwd.y = sin_pitch
     movss xmm0, [rsp+0x0C]
-    movss [spawn_fwd + 4], xmm0
+    movss [spawn_fwd + 4], xmm0    ; fwd.y
 
-    ; fwd.z = -cos_yaw * cos_pitch
     movss xmm0, [rsp+0x00]
     mulss xmm0, [rsp+0x08]
     xorps xmm1, xmm1
     subss xmm1, xmm0
-    movss [spawn_fwd + 8], xmm1
+    movss [spawn_fwd + 8], xmm1    ; fwd.z
 
-    ; ---- pos = cam_pos + fwd * 4 ----
+    ; pos = cam_pos + fwd * 4
     movss xmm7, [f_4_0]
 
     movss xmm0, [spawn_fwd + 0]
@@ -301,22 +298,15 @@ spawn_at_camera:
     addss xmm0, [cam_pos + 8]
     movss [spawn_pos + 8], xmm0
 
-    ; ---- velocity = fwd * spawn_forward_speed ----
-    movss xmm7, [spawn_forward_speed]
-
+    ; velocity = fwd * spawn_forward_speed
     movss xmm7, [spawn_fwd + 0]
     mulss xmm7, [spawn_forward_speed]
-    ; xmm7 = vel.x
-
     movss xmm8, [spawn_fwd + 4]
     mulss xmm8, [spawn_forward_speed]
-    ; xmm8 = vel.y
-
     movss xmm9, [spawn_fwd + 8]
     mulss xmm9, [spawn_forward_speed]
-    ; xmm9 = vel.z
 
-    ; ---- spawn args ----
+    ; spawn args
     movss xmm0, [spawn_pos + 0]
     movss xmm1, [spawn_pos + 4]
     movss xmm2, [spawn_pos + 8]
@@ -326,7 +316,6 @@ spawn_at_camera:
     movd xmm4, eax                 ; r
     movd xmm5, eax                 ; g
     movd xmm6, eax                 ; b
-    ; xmm7..xmm9 = velocity (already set)
 
     mov  edx, [tex_slot0 + TEX_ID]
 
@@ -655,7 +644,6 @@ renderer_init:
 
     call entity_init
 
-    ; ---- initial spawn: entities above ground, velocity = 0 ----
     lea  rbx, [spawn_list]
     mov  r12d, NUM_SPAWNS
 
@@ -679,7 +667,6 @@ renderer_init:
     movss xmm5, [rbx + 28]
     movss xmm6, [rbx + 32]
 
-    ; velocity = 0
     xorps xmm7, xmm7
     xorps xmm8, xmm8
     xorps xmm9, xmm9
@@ -775,35 +762,30 @@ renderer_draw:
     call mat4_mul
 
     ; ============================================
-    ; Draw ground (scaled cube at y = -4.05)
+    ; ground
     ; ============================================
-    ; mat_tmp = T(0, ground_pos_y, 0)
     lea  rcx, [mat_tmp]
     xorps xmm0, xmm0
     movss xmm1, [ground_pos_y]
     xorps xmm2, xmm2
     call mat4_make_translate
 
-    ; mat_tmp2 = S(20, 0.1, 20)
     lea  rcx, [mat_tmp2]
     movss xmm0, [ground_scale_x]
     movss xmm1, [ground_scale_y]
     movss xmm2, [ground_scale_z]
     call mat4_make_scale
 
-    ; mat_model = T * S
     lea  rcx, [mat_model]
     lea  rdx, [mat_tmp]
     lea  r8,  [mat_tmp2]
     call mat4_mul
 
-    ; mat_mvp = pv * model
     lea  rcx, [mat_mvp]
     lea  rdx, [mat_pv]
     lea  r8,  [mat_model]
     call mat4_mul
 
-    ; bind slot1 texture
     mov  eax, [tex_slot1 + TEX_ID]
     mov  [rsp+0x10], eax
     mov  dword [rsp+0x14], 0
@@ -832,7 +814,7 @@ renderer_draw:
     call mesh_draw
 
     ; ============================================
-    ; Draw entities
+    ; entities
     ; ============================================
     lea  rbx, [entities]
     mov  r12d, MAX_ENTITIES
@@ -841,26 +823,63 @@ renderer_draw:
     cmp  dword [rbx + E_TYPE], E_TYPE_EMPTY
     je   .entity_next
 
+    ; mat_tmp = T(pos)
     lea  rcx, [mat_tmp]
     movss xmm0, [rbx + E_POS + 0]
     movss xmm1, [rbx + E_POS + 4]
     movss xmm2, [rbx + E_POS + 8]
     call mat4_make_translate
 
+    cmp  dword [rbx + E_TYPE], E_TYPE_SPHERE
+    je   .sphere_rot
+
+    ; non-sphere: mat_tmp2 = Ry(rot_y)
     lea  rcx, [mat_tmp2]
     movss xmm0, [rbx + E_ROT_Y]
     call mat4_make_rotate_y
+    jmp  .rot_done
 
+.sphere_rot:
+    ; mat_scratch = Rx(rot_x)
+    lea  rcx, [mat_scratch]
+    movss xmm0, [rbx + E_ROT_X]
+    call mat4_make_rotate_x
+
+    ; mat_tmp2 = Rz(rot_z)
+    lea  rcx, [mat_tmp2]
+    movss xmm0, [rbx + E_ROT_Z]
+    call mat4_make_rotate_z
+
+    ; mat_scratch = mat_scratch * mat_tmp2   (dst == a, safe)
+    lea  rcx, [mat_scratch]
+    lea  rdx, [mat_scratch]
+    lea  r8,  [mat_tmp2]
+    call mat4_mul
+
+    ; mat_tmp2 = mat_scratch  (copy via SSE)
+    movups xmm0, [mat_scratch +  0]
+    movups xmm1, [mat_scratch + 16]
+    movups xmm2, [mat_scratch + 32]
+    movups xmm3, [mat_scratch + 48]
+    movups [mat_tmp2 +  0], xmm0
+    movups [mat_tmp2 + 16], xmm1
+    movups [mat_tmp2 + 32], xmm2
+    movups [mat_tmp2 + 48], xmm3
+
+.rot_done:
+    ; mat_model = mat_tmp * mat_tmp2   (T * rotation)
     lea  rcx, [mat_model]
     lea  rdx, [mat_tmp]
     lea  r8,  [mat_tmp2]
     call mat4_mul
 
+    ; mat_mvp = pv * mat_model
     lea  rcx, [mat_mvp]
     lea  rdx, [mat_pv]
     lea  r8,  [mat_model]
     call mat4_mul
 
+    ; bind entity texture
     mov  eax, [rbx + E_TEXTURE]
     test eax, eax
     jz   .no_tex
@@ -888,6 +907,7 @@ renderer_draw:
     lea  r8,  [rbx + E_COLOR]
     call shader_set_vec3
 
+    ; dispatch by type
     mov  eax, [rbx + E_TYPE]
     cmp  eax, E_TYPE_CUBE
     je   .draw_cube

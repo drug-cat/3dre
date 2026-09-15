@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/scene/entity.asm
-; Entity slots + spawn/destroy + gravity + ground + collisions
+; Entities + physics + rolling spheres + unstable stacking
 ; ============================================================
 BITS 64
 default rel
@@ -16,8 +16,10 @@ min_vy:         dd 0.3
 friction:       dd 2.5
 f_one:          dd 1.0
 f_half:         dd 0.5
-f_neg_three_q:  dd -0.75              ; impulse factor -(1+e)/2 with e=0.5
+f_neg_three_q:  dd -0.75
 f_epsilon_sq:   dd 0.000001
+f_point_one:    dd 0.1
+f_tilt:         dd 0.15            ; horizontal nudge applied to near-vertical normals
 abs_mask:       dd 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF
 
 section .bss
@@ -84,11 +86,13 @@ entity_spawn_internal:
 
     lea  rbx, [entities]
     mov  r10d, MAX_ENTITIES
+    xor  eax, eax                  ; index counter
 
 .find:
     cmp  dword [rbx + E_TYPE], E_TYPE_EMPTY
     je   .found
     add  rbx, ENTITY_SIZE
+    inc  eax
     dec  r10d
     jnz  .find
 
@@ -98,6 +102,8 @@ entity_spawn_internal:
     ret
 
 .found:
+    mov  r11d, eax                 ; save index
+
     mov  dword [rbx + E_TYPE], r8d
     mov  dword [rbx + E_FLAGS], 0
 
@@ -110,10 +116,13 @@ entity_spawn_internal:
 
     xorps xmm0, xmm0
     movss [rbx + E_ROT_Y], xmm0
+    movss [rbx + E_ROT_X], xmm0
+    movss [rbx + E_ROT_Z], xmm0
+
     movss xmm0, [rsp+0x0C]
     movss [rbx + E_ROT_SPEED], xmm0
 
-    mov  eax, 0x3F800000           ; 1.0f (scale)
+    mov  eax, 0x3F800000
     mov  dword [rbx + E_SCALE], eax
 
     movss xmm0, [rsp+0x10]
@@ -132,18 +141,18 @@ entity_spawn_internal:
     movss xmm0, [rsp+0x24]
     movss [rbx + E_VEL + 8], xmm0
 
-    ; E_HALF_H (also the collision radius)
-    mov  eax, 0x3F000000           ; 0.5f (cube / pyramid)
+    ; half-height / radius
+    mov  eax, 0x3F000000           ; 0.5f
     cmp  r8d, E_TYPE_SPHERE
     jne  .hh_set
-    mov  eax, 0x3F800000           ; 1.0f (sphere)
+    mov  eax, 0x3F800000           ; 1.0f
 .hh_set:
     mov  dword [rbx + E_HALF_H], eax
 
-    lea  rcx, [entities]
-    mov  rax, rbx
-    sub  rax, rcx
-    shr  rax, 6
+    mov  dword [rbx + E_PAD2], 0
+    mov  dword [rbx + E_PAD3], 0
+
+    mov  eax, r11d                 ; return index
 
     add  rsp, 0x30
     pop  rbx
@@ -153,8 +162,7 @@ entity_spawn_internal:
 entity_destroy:                    ; ecx = index
     cmp  ecx, MAX_ENTITIES
     jae  .done
-    mov  eax, ecx
-    shl  eax, 6
+    imul eax, ecx, ENTITY_SIZE
     lea  rdx, [entities]
     add  rdx, rax
     mov  dword [rdx + E_TYPE], E_TYPE_EMPTY
@@ -178,17 +186,14 @@ entity_destroy_last:
 
 ; ============================================================
 ; entity_update_all(dt)  ; xmm0 = dt
-;   Pass 1: rotation + gravity + integrate + ground + friction
-;   Pass 2: entity-entity collisions
 ; ============================================================
 entity_update_all:
     push rbx
     push r12
     sub  rsp, 0x28
 
-    movss [rsp], xmm0              ; dt
-
-    movups xmm15, [abs_mask]       ; for andps (register-register only)
+    movss [rsp], xmm0
+    movups xmm15, [abs_mask]
 
     lea  rbx, [entities]
     mov  r12d, MAX_ENTITIES
@@ -197,11 +202,34 @@ entity_update_all:
     cmp  dword [rbx + E_TYPE], E_TYPE_EMPTY
     je   .next
 
-    ; ---- rotation ----
+    ; ---- rotation: spheres roll, others spin around Y ----
+    cmp  dword [rbx + E_TYPE], E_TYPE_SPHERE
+    je   .sphere_roll
+
     movss xmm0, [rsp]
     mulss xmm0, [rbx + E_ROT_SPEED]
     addss xmm0, [rbx + E_ROT_Y]
     movss [rbx + E_ROT_Y], xmm0
+    jmp  .rot_done
+
+.sphere_roll:
+    ; rot_x += vel.z * dt / r
+    movss xmm0, [rbx + E_VEL + 8]
+    mulss xmm0, [rsp]
+    divss xmm0, [rbx + E_HALF_H]
+    addss xmm0, [rbx + E_ROT_X]
+    movss [rbx + E_ROT_X], xmm0
+
+    ; rot_z -= vel.x * dt / r
+    movss xmm0, [rbx + E_VEL + 0]
+    mulss xmm0, [rsp]
+    divss xmm0, [rbx + E_HALF_H]
+    xorps xmm1, xmm1
+    subss xmm1, xmm0
+    addss xmm1, [rbx + E_ROT_Z]
+    movss [rbx + E_ROT_Z], xmm1
+
+.rot_done:
 
     ; ---- gravity ----
     movss xmm0, [gravity]
@@ -276,6 +304,7 @@ entity_update_all:
     comiss xmm0, xmm1
     jae  .next
 
+    ; both nearly zero → damp spin as well
     movss xmm0, [rbx + E_ROT_SPEED]
     mulss xmm0, xmm6
     movss [rbx + E_ROT_SPEED], xmm0
@@ -295,8 +324,6 @@ entity_update_all:
 
 ; ============================================================
 ; entity_resolve_collisions — O(n²) sphere-sphere pairs
-;   For each (i, j) with i < j:
-;     if dist < r_i + r_j → push apart + apply impulse
 ; ============================================================
 entity_resolve_collisions:
     push rbp
@@ -304,12 +331,16 @@ entity_resolve_collisions:
     push r13
     push r14
     push r15
-    sub  rsp, 0x30
+    sub  rsp, 0x40
 
     ; stack layout:
     ;   [rsp+0x00..0x0B] : n (nx, ny, nz)
     ;   [rsp+0x0C]       : dist
     ;   [rsp+0x10]       : half_penetration
+    ;   [rsp+0x14]       : n_len (for renormalize after tilt)
+    ;   [rsp+0x18]       : tmp
+
+    movups xmm15, [abs_mask]
 
     mov  r13d, MAX_ENTITIES
     lea  r14, [entities]
@@ -332,7 +363,7 @@ entity_resolve_collisions:
     cmp  dword [r15 + E_TYPE], E_TYPE_EMPTY
     je   .inner_next
 
-    ; ---- dx, dy, dz ----
+    ; ---- d = pos_j - pos_i ----
     movss xmm0, [r15 + E_POS + 0]
     subss xmm0, [r14 + E_POS + 0]
     movss [rsp+0x00], xmm0
@@ -363,7 +394,6 @@ entity_resolve_collisions:
     comiss xmm3, xmm4
     jae  .inner_next
 
-    ; safety: dist_sq > epsilon
     movss xmm5, [f_epsilon_sq]
     comiss xmm3, xmm5
     jb   .inner_next
@@ -388,14 +418,65 @@ entity_resolve_collisions:
     mulss xmm7, xmm6
     movss [rsp+0x08], xmm7
 
-    ; ---- half_penetration = (r_sum - dist) * 0.5 ----
+    ; ---- Unstable stacking fix ----
+    ; If both are spheres AND normal is nearly vertical, tilt it in +X
+    cmp  dword [r14 + E_TYPE], E_TYPE_SPHERE
+    jne  .no_tilt
+    cmp  dword [r15 + E_TYPE], E_TYPE_SPHERE
+    jne  .no_tilt
+
+    ; |ny| should be ~1; check |nx| and |nz| are small
+    movss xmm8, [rsp+0x00]
+    andps xmm8, xmm15
+    movss xmm9, [f_point_one]
+    comiss xmm8, xmm9
+    jae  .no_tilt
+
+    movss xmm8, [rsp+0x08]
+    andps xmm8, xmm15
+    comiss xmm8, xmm9
+    jae  .no_tilt
+
+    ; tilt: nx += 0.15, then renormalize
+    movss xmm8, [rsp+0x00]
+    addss xmm8, [f_tilt]
+    movss [rsp+0x00], xmm8
+
+    ; recompute length
+    movaps xmm9, xmm8
+    mulss  xmm9, xmm9
+    movss  xmm10, [rsp+0x04]
+    mulss  xmm10, xmm10
+    addss  xmm9, xmm10
+    movss  xmm10, [rsp+0x08]
+    mulss  xmm10, xmm10
+    addss  xmm9, xmm10
+
+    sqrtss xmm9, xmm9
+    movss  xmm10, [f_one]
+    divss  xmm10, xmm9
+    movss  [rsp+0x14], xmm10       ; inv_len
+
+    movss xmm8, [rsp+0x00]
+    mulss xmm8, xmm10
+    movss [rsp+0x00], xmm8
+    movss xmm8, [rsp+0x04]
+    mulss xmm8, xmm10
+    movss [rsp+0x04], xmm8
+    movss xmm8, [rsp+0x08]
+    mulss xmm8, xmm10
+    movss [rsp+0x08], xmm8
+
+.no_tilt:
+
+    ; ---- half_penetration ----
     movss xmm7, [r14 + E_HALF_H]
     addss xmm7, [r15 + E_HALF_H]
     subss xmm7, xmm5
     mulss xmm7, [f_half]
     movss [rsp+0x10], xmm7
 
-    ; ---- ei.pos -= n * half_pen ----
+    ; ---- ei.pos -= n * hp ----
     movss xmm7, [rsp+0x00]
     mulss xmm7, [rsp+0x10]
     movss xmm8, [r14 + E_POS + 0]
@@ -414,7 +495,7 @@ entity_resolve_collisions:
     subss xmm8, xmm7
     movss [r14 + E_POS + 8], xmm8
 
-    ; ---- ej.pos += n * half_pen ----
+    ; ---- ej.pos += n * hp ----
     movss xmm7, [rsp+0x00]
     mulss xmm7, [rsp+0x10]
     movss xmm8, [r15 + E_POS + 0]
@@ -433,7 +514,7 @@ entity_resolve_collisions:
     addss xmm8, xmm7
     movss [r15 + E_POS + 8], xmm8
 
-    ; ---- v_rel = (v_j - v_i) · n ----
+    ; ---- v_rel · n ----
     movss xmm0, [r15 + E_VEL + 0]
     subss xmm0, [r14 + E_VEL + 0]
     movss xmm1, [r15 + E_VEL + 4]
@@ -449,10 +530,9 @@ entity_resolve_collisions:
 
     xorps xmm1, xmm1
     comiss xmm0, xmm1
-    jae  .inner_next               ; separating
+    jae  .inner_next
 
-    ; J = -0.75 * v_rel
-    mulss xmm0, [f_neg_three_q]
+    mulss xmm0, [f_neg_three_q]    ; J
 
     ; ---- ei.vel -= n * J ----
     movss xmm7, [rsp+0x00]
@@ -503,7 +583,7 @@ entity_resolve_collisions:
     jmp  .outer
 
 .outer_done:
-    add  rsp, 0x30
+    add  rsp, 0x40
     pop  r15
     pop  r14
     pop  r13
