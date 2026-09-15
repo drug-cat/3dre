@@ -1,7 +1,6 @@
 ; ============================================================
 ; src/main.asm
-; Entities: cubes, spheres, pyramids with PNG + checkerboard
-; Uses GDI+ for image loading
+; Entities + runtime spawn (C/V/B) + destroy (Delete)
 ; ============================================================
 BITS 64
 default rel
@@ -38,11 +37,16 @@ extern input_enable_mouse_look
 extern input_disable_mouse_look
 extern input_poll_mouse
 extern input_mouse_is_active
+extern input_is_pressed
 
 extern camera_get_view
 extern camera_get_proj
 extern camera_get_pos
 extern camera_update
+
+extern cam_pos
+extern cam_yaw
+extern cam_pitch
 
 extern mat4_mul
 extern mat4_make_translate
@@ -75,13 +79,13 @@ extern entity_init
 extern entity_spawn_cube
 extern entity_spawn_sphere
 extern entity_spawn_pyramid
+extern entity_destroy_last
 extern entity_update_all
 extern entities
 
 extern time_init
 extern time_dt
 
-; ---- Image loader (GDI+) ----
 extern image_init
 extern image_shutdown
 
@@ -102,7 +106,7 @@ global WinMain
 section .data
 align 16
 
-window_title db "3dre - Textured Entities",0
+window_title db "3dre | C=spawn cube  V=sphere  B=pyramid  Del=remove last",0
 rel_vs_path  db "shaders\basic.vert",0
 rel_fs_path  db "shaders\basic.frag",0
 rel_png_a    db "assets\test.png",0
@@ -128,23 +132,23 @@ ambient_level    dd 0.25
 spec_color       dd 1.0, 1.0, 1.0
 shininess        dd 64.0
 
-; ---- Spawn table (36 bytes per entry) ----
 align 16
 spawn_list:
     dd E_TYPE_CUBE,    0,   -3.0,  1.5, -1.0,   0.8,   1.0, 1.0, 1.0
-    dd E_TYPE_CUBE,    0,    3.0,  1.5, -1.0,   0.6,   1.0, 1.0, 1.0
+    dd E_TYPE_CUBE,    1,    3.0,  1.5, -1.0,   0.6,   0.3, 1.0, 0.3
     dd E_TYPE_PYRAMID, 0,   -3.0, -1.5,  1.0,   0.7,   1.0, 1.0, 1.0
-    dd E_TYPE_PYRAMID, 0,    3.0, -1.5,  1.0,   0.5,   1.0, 1.0, 1.0
+    dd E_TYPE_PYRAMID, 1,    3.0, -1.5,  1.0,   0.5,   1.0, 1.0, 0.3
     dd E_TYPE_SPHERE,  0,   -4.0,  0.0,  0.0,   0.9,   1.0, 1.0, 1.0
-    dd E_TYPE_SPHERE,  0,    0.0,  2.5,  0.0,   1.2,   1.0, 1.0, 1.0
+    dd E_TYPE_SPHERE,  1,    0.0,  2.5,  0.0,   1.2,   0.9, 0.9, 0.95
     dd E_TYPE_SPHERE,  0,    4.0,  0.0,  0.0,   0.9,   1.0, 1.0, 1.0
-    dd E_TYPE_SPHERE,  0,    0.0, -2.5,  0.0,   1.2,   1.0, 1.0, 1.0
+    dd E_TYPE_SPHERE,  1,    0.0, -2.5,  0.0,   1.2,   0.5, 0.7, 1.0
 
 NUM_SPAWNS equ 8
 SPAWN_SIZE equ 36
 
 align 16
 f_1_0:      dd 1.0
+f_4_0:      dd 4.0
 bg_rgb:     dd 0.12
 
 ; ============================================================
@@ -175,6 +179,8 @@ mat_model       resb 64
 mat_mvp         resb 64
 
 dt_seconds      resd 1
+spawn_fwd       resd 3
+spawn_pos       resd 3
 
 ; ============================================================
 section .text
@@ -226,6 +232,139 @@ set_light_uniforms:
     ret
 
 ; ============================================================
+; spawn_at_camera(type) — spawn 4 units ahead of the camera
+;   ecx = E_TYPE_*
+;   Computes forward vector inline to avoid extra calls
+; ============================================================
+spawn_at_camera:
+    push rbx
+    push r12
+    sub  rsp, 0x28
+
+    mov  r12d, ecx                 ; type
+
+    ; ---- compute forward from cam_yaw, cam_pitch ----
+    fld  dword [cam_yaw]
+    fsincos
+    fstp dword [rsp+0x00]          ; cos_yaw
+    fstp dword [rsp+0x04]          ; sin_yaw
+
+    fld  dword [cam_pitch]
+    fsincos
+    fstp dword [rsp+0x08]          ; cos_pitch
+    fstp dword [rsp+0x0C]          ; sin_pitch
+
+    ; fwd.x = sin_yaw * cos_pitch
+    movss xmm0, [rsp+0x04]
+    mulss xmm0, [rsp+0x08]
+    movss [spawn_fwd + 0], xmm0
+
+    ; fwd.y = sin_pitch
+    movss xmm0, [rsp+0x0C]
+    movss [spawn_fwd + 4], xmm0
+
+    ; fwd.z = -cos_yaw * cos_pitch
+    movss xmm0, [rsp+0x00]
+    mulss xmm0, [rsp+0x08]
+    xorps xmm1, xmm1
+    subss xmm1, xmm0
+    movss [spawn_fwd + 8], xmm1
+
+    ; ---- pos = cam_pos + fwd * 4 ----
+    movss xmm7, [f_4_0]
+
+    movss xmm0, [spawn_fwd + 0]
+    mulss xmm0, xmm7
+    addss xmm0, [cam_pos + 0]
+    movss [spawn_pos + 0], xmm0
+
+    movss xmm0, [spawn_fwd + 4]
+    mulss xmm0, xmm7
+    addss xmm0, [cam_pos + 4]
+    movss [spawn_pos + 4], xmm0
+
+    movss xmm0, [spawn_fwd + 8]
+    mulss xmm0, xmm7
+    addss xmm0, [cam_pos + 8]
+    movss [spawn_pos + 8], xmm0
+
+    ; ---- spawn args ----
+    movss xmm0, [spawn_pos + 0]
+    movss xmm1, [spawn_pos + 4]
+    movss xmm2, [spawn_pos + 8]
+
+    mov  eax, 0x3F800000           ; 1.0f
+    movd xmm3, eax                 ; rot_speed
+    movd xmm4, eax                 ; r
+    movd xmm5, eax                 ; g
+    movd xmm6, eax                 ; b
+
+    mov  edx, [tex_slot0 + TEX_ID]
+
+    cmp  r12d, E_TYPE_CUBE
+    je   .cube
+    cmp  r12d, E_TYPE_SPHERE
+    je   .sphere
+    cmp  r12d, E_TYPE_PYRAMID
+    je   .pyramid
+    jmp  .done
+
+.cube:
+    call entity_spawn_cube
+    jmp  .done
+.sphere:
+    call entity_spawn_sphere
+    jmp  .done
+.pyramid:
+    call entity_spawn_pyramid
+
+.done:
+    add  rsp, 0x28
+    pop  r12
+    pop  rbx
+    ret
+
+; ============================================================
+; handle_entity_input()
+; ============================================================
+handle_entity_input:
+    sub  rsp, 0x28
+
+    mov  ecx, VK_C
+    call input_is_pressed
+    test eax, eax
+    jz   .no_c
+    mov  ecx, E_TYPE_CUBE
+    call spawn_at_camera
+.no_c:
+
+    mov  ecx, VK_V
+    call input_is_pressed
+    test eax, eax
+    jz   .no_v
+    mov  ecx, E_TYPE_SPHERE
+    call spawn_at_camera
+.no_v:
+
+    mov  ecx, VK_B
+    call input_is_pressed
+    test eax, eax
+    jz   .no_b
+    mov  ecx, E_TYPE_PYRAMID
+    call spawn_at_camera
+.no_b:
+
+    mov  ecx, VK_DELETE
+    call input_is_pressed
+    test eax, eax
+    jz   .done
+    call entity_destroy_last
+
+.done:
+    add  rsp, 0x28
+    ret
+
+; ============================================================
 WinMain:
     push rbx
     push rsi
@@ -271,7 +410,7 @@ WinMain:
 
     call input_init
     call time_init
-    call image_init                ; initialize GDI+
+    call image_init
     call renderer_init
 
     lea  rax, [shader_prog]
@@ -311,6 +450,7 @@ WinMain:
 .render:
     call update_time
     call input_poll_mouse
+    call handle_entity_input
     movss xmm0, [dt_seconds]
     call camera_update
     movss xmm0, [dt_seconds]
@@ -320,7 +460,7 @@ WinMain:
     jmp  .loop
 
 .exit:
-    call image_shutdown            ; shut down GDI+
+    call image_shutdown
     lea  rcx, [tex_slot1]
     call texture_destroy
     lea  rcx, [tex_slot0]
@@ -431,7 +571,6 @@ renderer_init:
     push r12
     sub  rsp, 0x28
 
-    ; ---- Shader ----
     lea  rcx, [rel_vs_path]
     lea  rdx, [abs_vs_path]
     mov  r8d, 260
@@ -454,7 +593,6 @@ renderer_init:
     call set_light_uniforms
 
 .no_shader:
-    ; ---- Meshes ----
     lea  rcx, [cube_mesh]
     call mesh_create_cube
 
@@ -466,7 +604,6 @@ renderer_init:
     lea  rcx, [pyramid_mesh]
     call mesh_create_pyramid
 
-    ; ---- Texture slot 0: PNG first, fallback to checkerboard ----
     lea  rcx, [rel_png_a]
     lea  rdx, [abs_png_a]
     mov  r8d, 260
@@ -478,20 +615,17 @@ renderer_init:
     test eax, eax
     jnz  .png_ok
 
-    ; fallback to fine checkerboard
     lea  rcx, [tex_slot0]
     mov  edx, 16
     mov  r8d, 8
     call texture_create_checkerboard
 
 .png_ok:
-    ; ---- Texture slot 1: chunky checkerboard ----
     lea  rcx, [tex_slot1]
     mov  edx, 32
     mov  r8d, 4
     call texture_create_checkerboard
 
-    ; ---- Entities ----
     call entity_init
 
     lea  rbx, [spawn_list]
@@ -539,7 +673,6 @@ renderer_init:
     dec  r12d
     jnz  .spawn_loop
 
-    ; ---- GL state ----
     mov  ecx, GL_DEPTH_TEST
     call glEnable
     mov  ecx, GL_CULL_FACE
