@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/scene/entity.asm
-; Entity slots + physics + collisions + scene serialization
+; Entity slots + physics + AABB/sphere collisions (SAP broad phase)
 ; ============================================================
 BITS 64
 default rel
@@ -26,6 +26,10 @@ section .bss
 align 16
 global entities
 entities:       resb MAX_ENTITIES * ENTITY_SIZE
+
+; sorted list of entity pointers for SAP
+align 16
+sorted_entities: resq MAX_ENTITIES
 
 section .text
 global entity_init
@@ -309,57 +313,109 @@ entity_update_all:
     ret
 
 ; ============================================================
-; entity_resolve_collisions
+; entity_resolve_collisions — Sweep-and-Prune broad phase
+;   Gather → Sort by pos.x → Sweep pairs where x is close
 ; ============================================================
 entity_resolve_collisions:
     push rbp
+    push rbx
     push r12
     push r13
     push r14
     push r15
-    sub  rsp, 0x40
+    sub  rsp, 0x48
 
     movups xmm15, [abs_mask]
 
-    mov  r13d, MAX_ENTITIES
-    lea  r14, [entities]
-    xor  r12d, r12d
+    ; ---- 1. Gather pointers to live entities ----
+    lea  r12, [sorted_entities]
+    lea  rbx, [entities]
+    xor  r13d, r13d
+    mov  ecx, MAX_ENTITIES
 
-.outer:
-    cmp  r12d, r13d
-    jae  .outer_done
-    cmp  dword [r14 + E_TYPE], E_TYPE_EMPTY
-    je   .outer_next
+.gather:
+    cmp  dword [rbx + E_TYPE], E_TYPE_EMPTY
+    je   .gskip
+    mov  [r12 + r13*8], rbx
+    inc  r13d
+.gskip:
+    add  rbx, ENTITY_SIZE
+    dec  ecx
+    jnz  .gather
 
-    lea  r15, [r14 + ENTITY_SIZE]
-    lea  ebp, [r12d + 1]
+    cmp  r13d, 2
+    jb   .done
 
-.inner:
-    cmp  ebp, r13d
-    jae  .outer_next
-    cmp  dword [r15 + E_TYPE], E_TYPE_EMPTY
-    je   .inner_next
+    ; ---- 2. Insertion sort by pos.x ----
+    mov  r14d, 1
+.sort_outer:
+    cmp  r14d, r13d
+    jae  .sort_done
 
-    ; ---- dispatch: sphere involved → sphere path, else box path ----
+    mov  rax, [r12 + r14*8]
+    movss xmm0, [rax + E_POS + 0]
+
+    mov  ebp, r14d
+.sort_inner:
+    test ebp, ebp
+    jz   .place
+    mov  rbx, [r12 + rbp*8 - 8]
+    movss xmm1, [rbx + E_POS + 0]
+    comiss xmm1, xmm0
+    jbe  .place
+    mov  [r12 + rbp*8], rbx
+    dec  ebp
+    jmp  .sort_inner
+.place:
+    mov  [r12 + rbp*8], rax
+    inc  r14d
+    jmp  .sort_outer
+.sort_done:
+
+    ; ---- 3. Sweep ----
+    xor  r10d, r10d                ; i index
+.outer_i:
+    cmp  r10d, r13d
+    jae  .done
+
+    mov  r14, [r12 + r10*8]
+
+    ; threshold = half_i + 1.0 (max half for any entity)
+    movss xmm0, [r14 + E_POS + 0]
+    movss [rsp+0x00], xmm0
+    movss xmm1, [r14 + E_HALF_H]
+    addss xmm1, [f_one]
+    movss [rsp+0x04], xmm1
+
+    lea  r11d, [r10d + 1]          ; j = i+1
+.inner_j:
+    cmp  r11d, r13d
+    jae  .next_i
+
+    mov  r15, [r12 + r11*8]
+    movss xmm0, [r15 + E_POS + 0]
+    subss xmm0, [rsp+0x00]
+    comiss xmm0, [rsp+0x04]
+    ja   .next_i                   ; j is far in x → no more pairs for this i
+
+    ; ---- narrow-phase dispatch ----
     cmp  dword [r14 + E_TYPE], E_TYPE_SPHERE
     je   .sphere_path
     cmp  dword [r15 + E_TYPE], E_TYPE_SPHERE
     je   .sphere_path
 
     ; ============================================
-    ; BOX-BOX path (AABB)
+    ; BOX-BOX (AABB along min-overlap axis)
     ; ============================================
     movss xmm0, [r15 + E_POS + 0]
     subss xmm0, [r14 + E_POS + 0]
-    movss [rsp+0x00], xmm0
-
+    movss [rsp+0x08], xmm0
     movss xmm1, [r15 + E_POS + 4]
     subss xmm1, [r14 + E_POS + 4]
-    movss [rsp+0x04], xmm1
-
+    movss [rsp+0x0C], xmm1
     movss xmm2, [r15 + E_POS + 8]
     subss xmm2, [r14 + E_POS + 8]
-    movss [rsp+0x08], xmm2
+    movss [rsp+0x10], xmm2
 
     movss xmm3, [r14 + E_HALF_H]
     addss xmm3, [r15 + E_HALF_H]
@@ -370,21 +426,21 @@ entity_resolve_collisions:
     subss  xmm5, xmm4
     xorps  xmm6, xmm6
     comiss xmm5, xmm6
-    jbe  .inner_next
+    jbe  .next_j
 
     movaps xmm4, xmm1
     andps  xmm4, xmm15
     movaps xmm7, xmm3
     subss  xmm7, xmm4
     comiss xmm7, xmm6
-    jbe  .inner_next
+    jbe  .next_j
 
     movaps xmm4, xmm2
     andps  xmm4, xmm15
     movaps xmm8, xmm3
     subss  xmm8, xmm4
     comiss xmm8, xmm6
-    jbe  .inner_next
+    jbe  .next_j
 
     movaps xmm9, xmm5
     xor  eax, eax
@@ -399,10 +455,10 @@ entity_resolve_collisions:
     mov  eax, 2
 .box_axis_ready:
     mulss xmm9, [f_half]
-    movss [rsp+0x10], xmm9
+    movss [rsp+0x14], xmm9
 
-    mov  r10d, 0x3F800000
-    mov  r11d, 0xBF800000
+    mov  r9d, 0x3F800000
+    mov  r8d, 0xBF800000
 
     cmp  eax, 0
     je   .box_axis_x
@@ -410,67 +466,65 @@ entity_resolve_collisions:
     je   .box_axis_y
 
     xorps xmm10, xmm10
-    movss [rsp+0x00], xmm10
-    movss [rsp+0x04], xmm10
-    movss xmm11, [rsp+0x08]
+    movss [rsp+0x08], xmm10
+    movss [rsp+0x0C], xmm10
+    movss xmm11, [rsp+0x10]
     xorps xmm12, xmm12
     comiss xmm11, xmm12
     jbe  .box_z_neg
-    movd xmm10, r10d
-    movss [rsp+0x08], xmm10
+    movd xmm10, r9d
+    movss [rsp+0x10], xmm10
     jmp  .apply_impulse
 .box_z_neg:
-    movd xmm10, r11d
-    movss [rsp+0x08], xmm10
+    movd xmm10, r8d
+    movss [rsp+0x10], xmm10
     jmp  .apply_impulse
 
 .box_axis_x:
-    movss xmm11, [rsp+0x00]
+    movss xmm11, [rsp+0x08]
     xorps xmm10, xmm10
-    movss [rsp+0x04], xmm10
-    movss [rsp+0x08], xmm10
+    movss [rsp+0x0C], xmm10
+    movss [rsp+0x10], xmm10
     xorps xmm12, xmm12
     comiss xmm11, xmm12
     jbe  .box_x_neg
-    movd xmm10, r10d
-    movss [rsp+0x00], xmm10
+    movd xmm10, r9d
+    movss [rsp+0x08], xmm10
     jmp  .apply_impulse
 .box_x_neg:
-    movd xmm10, r11d
-    movss [rsp+0x00], xmm10
+    movd xmm10, r8d
+    movss [rsp+0x08], xmm10
     jmp  .apply_impulse
 
 .box_axis_y:
-    movss xmm11, [rsp+0x04]
+    movss xmm11, [rsp+0x0C]
     xorps xmm10, xmm10
-    movss [rsp+0x00], xmm10
     movss [rsp+0x08], xmm10
+    movss [rsp+0x10], xmm10
     xorps xmm12, xmm12
     comiss xmm11, xmm12
     jbe  .box_y_neg
-    movd xmm10, r10d
-    movss [rsp+0x04], xmm10
+    movd xmm10, r9d
+    movss [rsp+0x0C], xmm10
     jmp  .apply_impulse
 .box_y_neg:
-    movd xmm10, r11d
-    movss [rsp+0x04], xmm10
+    movd xmm10, r8d
+    movss [rsp+0x0C], xmm10
     jmp  .apply_impulse
 
     ; ============================================
-    ; SPHERE path (sphere-sphere)
+    ; SPHERE (sphere-sphere)
     ; ============================================
 .sphere_path:
     movss xmm0, [r15 + E_POS + 0]
     subss xmm0, [r14 + E_POS + 0]
-    movss [rsp+0x00], xmm0
-
+    movss [rsp+0x08], xmm0
     movss xmm1, [r15 + E_POS + 4]
     subss xmm1, [r14 + E_POS + 4]
-    movss [rsp+0x04], xmm1
-
+    movss [rsp+0x0C], xmm1
     movss xmm2, [r15 + E_POS + 8]
     subss xmm2, [r14 + E_POS + 8]
-    movss [rsp+0x08], xmm2
+    movss [rsp+0x10], xmm2
 
     movaps xmm3, xmm0
     mulss  xmm3, xmm3
@@ -486,55 +540,55 @@ entity_resolve_collisions:
     mulss xmm4, xmm4
 
     comiss xmm3, xmm4
-    jae  .inner_next
+    jae  .next_j
 
     movss xmm5, [f_epsilon_sq]
     comiss xmm3, xmm5
-    jb   .inner_next
+    jb   .next_j
 
     sqrtss xmm5, xmm3
-    movss [rsp+0x0C], xmm5
+    movss [rsp+0x18], xmm5
 
     movss xmm6, [f_one]
     divss xmm6, xmm5
 
-    movss xmm7, [rsp+0x00]
-    mulss xmm7, xmm6
-    movss [rsp+0x00], xmm7
-    movss xmm7, [rsp+0x04]
-    mulss xmm7, xmm6
-    movss [rsp+0x04], xmm7
     movss xmm7, [rsp+0x08]
     mulss xmm7, xmm6
     movss [rsp+0x08], xmm7
+    movss xmm7, [rsp+0x0C]
+    mulss xmm7, xmm6
+    movss [rsp+0x0C], xmm7
+    movss xmm7, [rsp+0x10]
+    mulss xmm7, xmm6
+    movss [rsp+0x10], xmm7
 
-    ; unstable-stack tilt for two spheres with near-vertical normal
+    ; tilt fix for two spheres
     cmp  dword [r14 + E_TYPE], E_TYPE_SPHERE
     jne  .no_tilt
     cmp  dword [r15 + E_TYPE], E_TYPE_SPHERE
     jne  .no_tilt
 
-    movss xmm8, [rsp+0x00]
+    movss xmm8, [rsp+0x08]
     andps xmm8, xmm15
     movss xmm9, [f_point_one]
     comiss xmm8, xmm9
     jae  .no_tilt
 
-    movss xmm8, [rsp+0x08]
+    movss xmm8, [rsp+0x10]
     andps xmm8, xmm15
     comiss xmm8, xmm9
     jae  .no_tilt
 
-    movss xmm8, [rsp+0x00]
+    movss xmm8, [rsp+0x08]
     addss xmm8, [f_tilt]
-    movss [rsp+0x00], xmm8
+    movss [rsp+0x08], xmm8
 
     movaps xmm9, xmm8
     mulss  xmm9, xmm9
-    movss  xmm10, [rsp+0x04]
+    movss  xmm10, [rsp+0x0C]
     mulss  xmm10, xmm10
     addss  xmm9, xmm10
-    movss  xmm10, [rsp+0x08]
+    movss  xmm10, [rsp+0x10]
     mulss  xmm10, xmm10
     addss  xmm9, xmm10
 
@@ -542,63 +596,66 @@ entity_resolve_collisions:
     movss  xmm10, [f_one]
     divss  xmm10, xmm9
 
-    movss xmm8, [rsp+0x00]
-    mulss xmm8, xmm10
-    movss [rsp+0x00], xmm8
-    movss xmm8, [rsp+0x04]
-    mulss xmm8, xmm10
-    movss [rsp+0x04], xmm8
     movss xmm8, [rsp+0x08]
     mulss xmm8, xmm10
     movss [rsp+0x08], xmm8
+    movss xmm8, [rsp+0x0C]
+    mulss xmm8, xmm10
+    movss [rsp+0x0C], xmm8
+    movss xmm8, [rsp+0x10]
+    mulss xmm8, xmm10
+    movss [rsp+0x10], xmm8
 
 .no_tilt:
     movss xmm7, [r14 + E_HALF_H]
     addss xmm7, [r15 + E_HALF_H]
     subss xmm7, xmm5
     mulss xmm7, [f_half]
-    movss [rsp+0x10], xmm7
+    movss [rsp+0x14], xmm7
 
 ; ============================================================
-; APPLY IMPULSE (shared)
+; APPLY IMPULSE (shared by both paths)
 ; ============================================================
 .apply_impulse:
-    movss xmm7, [rsp+0x00]
-    mulss xmm7, [rsp+0x10]
+    ; ei.pos -= n * hp
+    movss xmm7, [rsp+0x08]
+    mulss xmm7, [rsp+0x14]
     movss xmm8, [r14 + E_POS + 0]
     subss xmm8, xmm7
     movss [r14 + E_POS + 0], xmm8
 
-    movss xmm7, [rsp+0x04]
-    mulss xmm7, [rsp+0x10]
+    movss xmm7, [rsp+0x0C]
+    mulss xmm7, [rsp+0x14]
     movss xmm8, [r14 + E_POS + 4]
     subss xmm8, xmm7
     movss [r14 + E_POS + 4], xmm8
 
-    movss xmm7, [rsp+0x08]
-    mulss xmm7, [rsp+0x10]
+    movss xmm7, [rsp+0x10]
+    mulss xmm7, [rsp+0x14]
     movss xmm8, [r14 + E_POS + 8]
     subss xmm8, xmm7
     movss [r14 + E_POS + 8], xmm8
 
-    movss xmm7, [rsp+0x00]
-    mulss xmm7, [rsp+0x10]
+    ; ej.pos += n * hp
+    movss xmm7, [rsp+0x08]
+    mulss xmm7, [rsp+0x14]
     movss xmm8, [r15 + E_POS + 0]
     addss xmm8, xmm7
     movss [r15 + E_POS + 0], xmm8
 
-    movss xmm7, [rsp+0x04]
-    mulss xmm7, [rsp+0x10]
+    movss xmm7, [rsp+0x0C]
+    mulss xmm7, [rsp+0x14]
     movss xmm8, [r15 + E_POS + 4]
     addss xmm8, xmm7
     movss [r15 + E_POS + 4], xmm8
 
-    movss xmm7, [rsp+0x08]
-    mulss xmm7, [rsp+0x10]
+    movss xmm7, [rsp+0x10]
+    mulss xmm7, [rsp+0x14]
     movss xmm8, [r15 + E_POS + 8]
     addss xmm8, xmm7
     movss [r15 + E_POS + 8], xmm8
 
+    ; v_rel = (vB - vA) · n
     movss xmm0, [r15 + E_VEL + 0]
     subss xmm0, [r14 + E_VEL + 0]
     movss xmm1, [r15 + E_VEL + 4]
@@ -606,76 +663,77 @@ entity_resolve_collisions:
     movss xmm2, [r15 + E_VEL + 8]
     subss xmm2, [r14 + E_VEL + 8]
 
-    mulss xmm0, [rsp+0x00]
-    mulss xmm1, [rsp+0x04]
-    mulss xmm2, [rsp+0x08]
+    mulss xmm0, [rsp+0x08]
+    mulss xmm1, [rsp+0x0C]
+    mulss xmm2, [rsp+0x10]
     addss xmm0, xmm1
     addss xmm0, xmm2
 
     xorps xmm1, xmm1
     comiss xmm0, xmm1
-    jae  .inner_next
+    jae  .next_j
 
     mulss xmm0, [f_neg_three_q]
 
-    movss xmm7, [rsp+0x00]
+    ; vA -= n * J
+    movss xmm7, [rsp+0x08]
     mulss xmm7, xmm0
     movss xmm8, [r14 + E_VEL + 0]
     subss xmm8, xmm7
     movss [r14 + E_VEL + 0], xmm8
 
-    movss xmm7, [rsp+0x04]
+    movss xmm7, [rsp+0x0C]
     mulss xmm7, xmm0
     movss xmm8, [r14 + E_VEL + 4]
     subss xmm8, xmm7
     movss [r14 + E_VEL + 4], xmm8
 
-    movss xmm7, [rsp+0x08]
+    movss xmm7, [rsp+0x10]
     mulss xmm7, xmm0
     movss xmm8, [r14 + E_VEL + 8]
     subss xmm8, xmm7
     movss [r14 + E_VEL + 8], xmm8
 
-    movss xmm7, [rsp+0x00]
+    ; vB += n * J
+    movss xmm7, [rsp+0x08]
     mulss xmm7, xmm0
     movss xmm8, [r15 + E_VEL + 0]
     addss xmm8, xmm7
     movss [r15 + E_VEL + 0], xmm8
 
-    movss xmm7, [rsp+0x04]
+    movss xmm7, [rsp+0x0C]
     mulss xmm7, xmm0
     movss xmm8, [r15 + E_VEL + 4]
     addss xmm8, xmm7
     movss [r15 + E_VEL + 4], xmm8
 
-    movss xmm7, [rsp+0x08]
+    movss xmm7, [rsp+0x10]
     mulss xmm7, xmm0
     movss xmm8, [r15 + E_VEL + 8]
     addss xmm8, xmm7
     movss [r15 + E_VEL + 8], xmm8
 
-.inner_next:
-    add  r15, ENTITY_SIZE
-    inc  ebp
-    jmp  .inner
+.next_j:
+    inc  r11d
+    jmp  .inner_j
 
-.outer_next:
-    add  r14, ENTITY_SIZE
-    inc  r12d
-    jmp  .outer
+.next_i:
+    inc  r10d
+    jmp  .outer_i
 
-.outer_done:
-    add  rsp, 0x40
+.done:
+    add  rsp, 0x48
     pop  r15
     pop  r14
     pop  r13
     pop  r12
+    pop  rbx
     pop  rbp
     ret
 
 ; ============================================================
-; entity_save_to_buffer(u8* buf) → rax = bytes written
-;   Each entity → 68-byte record.
+; entity_save_to_buffer / entity_load_from_buffer
+; (unchanged from previous version)
 ; ============================================================
 entity_save_to_buffer:
     push rbx
@@ -751,9 +809,6 @@ entity_save_to_buffer:
     pop  rbx
     ret
 
-; ============================================================
-; entity_load_from_buffer(u8* buf, u32 count)
-; ============================================================
 entity_load_from_buffer:
     push rbx
     push rsi
@@ -785,7 +840,6 @@ entity_load_from_buffer:
 .found:
     mov  rbx, rax
 
-    ; zero struct
     pxor xmm0, xmm0
     movdqu [rbx +  0], xmm0
     movdqu [rbx + 16], xmm0
