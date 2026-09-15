@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/render/mesh.asm
-; Mesh abstraction: cube, sphere, pyramid, crosshair
+; Mesh abstraction: cube, sphere, pyramid, crosshair, skybox
 ; Vertex layout: pos(3) + color(3) + normal(3) + uv(2) = 44 bytes
 ; ============================================================
 BITS 64
@@ -73,36 +73,29 @@ cube_indices:
     dd 20,22,21, 20,23,22
 
 ; ============================================================
-; Unit pyramid: apex at (0, 0.5, 0), base square at y = -0.5
-; 4 side triangles + 2 base triangles = 18 vertices
+; Unit pyramid
 ; ============================================================
 pyramid_vertices:
-    ; side 0: -Z
     dd  0.0,  0.5,  0.0,   1.0, 0.5, 0.2,    0.0,  0.4472, -0.8944,   0.5, 1.0
     dd -0.5, -0.5, -0.5,   1.0, 0.5, 0.2,    0.0,  0.4472, -0.8944,   0.0, 0.0
     dd  0.5, -0.5, -0.5,   1.0, 0.5, 0.2,    0.0,  0.4472, -0.8944,   1.0, 0.0
 
-    ; side 1: +X
     dd  0.0,  0.5,  0.0,   0.8, 0.8, 0.2,    0.8944,  0.4472, 0.0,   0.5, 1.0
     dd  0.5, -0.5, -0.5,   0.8, 0.8, 0.2,    0.8944,  0.4472, 0.0,   0.0, 0.0
     dd  0.5, -0.5,  0.5,   0.8, 0.8, 0.2,    0.8944,  0.4472, 0.0,   1.0, 0.0
 
-    ; side 2: +Z
     dd  0.0,  0.5,  0.0,   0.2, 0.8, 0.4,    0.0,  0.4472, 0.8944,   0.5, 1.0
     dd  0.5, -0.5,  0.5,   0.2, 0.8, 0.4,    0.0,  0.4472, 0.8944,   0.0, 0.0
     dd -0.5, -0.5,  0.5,   0.2, 0.8, 0.4,    0.0,  0.4472, 0.8944,   1.0, 0.0
 
-    ; side 3: -X
     dd  0.0,  0.5,  0.0,   0.4, 0.4, 0.9,   -0.8944, 0.4472, 0.0,   0.5, 1.0
     dd -0.5, -0.5,  0.5,   0.4, 0.4, 0.9,   -0.8944, 0.4472, 0.0,   0.0, 0.0
     dd -0.5, -0.5, -0.5,   0.4, 0.4, 0.9,   -0.8944, 0.4472, 0.0,   1.0, 0.0
 
-    ; base triangle A (reversed winding for culling)
     dd -0.5, -0.5, -0.5,   0.5, 0.5, 0.5,    0.0, -1.0, 0.0,   0.0, 1.0
     dd  0.5, -0.5,  0.5,   0.5, 0.5, 0.5,    0.0, -1.0, 0.0,   1.0, 0.0
     dd  0.5, -0.5, -0.5,   0.5, 0.5, 0.5,    0.0, -1.0, 0.0,   1.0, 1.0
 
-    ; base triangle B (reversed winding)
     dd -0.5, -0.5, -0.5,   0.5, 0.5, 0.5,    0.0, -1.0, 0.0,   0.0, 1.0
     dd -0.5, -0.5,  0.5,   0.5, 0.5, 0.5,    0.0, -1.0, 0.0,   0.0, 0.0
     dd  0.5, -0.5,  0.5,   0.5, 0.5, 0.5,    0.0, -1.0, 0.0,   1.0, 0.0
@@ -112,15 +105,13 @@ pyramid_indices:
     dd 0,1,2, 3,4,5, 6,7,8, 9,10,11, 12,13,14, 15,16,17
 
 ; ============================================================
-; Crosshair: 8 vertices in NDC, two thin quads (green)
+; Crosshair
 ; ============================================================
 crosshair_vertices:
-    ; horizontal bar
     dd -0.025, -0.0033, 0.0,   0.0, 1.0, 0.0,   0.0, 0.0, 1.0,   0.0, 0.0
     dd  0.025, -0.0033, 0.0,   0.0, 1.0, 0.0,   0.0, 0.0, 1.0,   0.0, 0.0
     dd  0.025,  0.0033, 0.0,   0.0, 1.0, 0.0,   0.0, 0.0, 1.0,   0.0, 0.0
     dd -0.025,  0.0033, 0.0,   0.0, 1.0, 0.0,   0.0, 0.0, 1.0,   0.0, 0.0
-    ; vertical bar
     dd -0.0025, -0.0333, 0.0,   0.0, 1.0, 0.0,   0.0, 0.0, 1.0,   0.0, 0.0
     dd  0.0025, -0.0333, 0.0,   0.0, 1.0, 0.0,   0.0, 0.0, 1.0,   0.0, 0.0
     dd  0.0025,  0.0333, 0.0,   0.0, 1.0, 0.0,   0.0, 0.0, 1.0,   0.0, 0.0
@@ -136,19 +127,16 @@ global mesh_create_cube
 global mesh_create_sphere
 global mesh_create_pyramid
 global mesh_create_crosshair
+global mesh_create_skybox
 global mesh_draw
 global mesh_destroy
 
-; ============================================================
-; mesh_upload_attribs(Mesh* m)
-;   Assumes VAO bound and VBO bound to GL_ARRAY_BUFFER.
 ; ============================================================
 mesh_upload_attribs:
     push rbx
     sub  rsp, 0x30
     mov  rbx, rcx
 
-    ; aPos
     mov  ecx, MESH_ATTR_POS
     mov  edx, 3
     mov  r8d, GL_FLOAT
@@ -159,7 +147,6 @@ mesh_upload_attribs:
     mov  ecx, MESH_ATTR_POS
     call qword [glEnableVertexAttribArray]
 
-    ; aColor
     mov  ecx, MESH_ATTR_COLOR
     mov  edx, 3
     mov  r8d, GL_FLOAT
@@ -170,7 +157,6 @@ mesh_upload_attribs:
     mov  ecx, MESH_ATTR_COLOR
     call qword [glEnableVertexAttribArray]
 
-    ; aNormal
     mov  ecx, MESH_ATTR_NORMAL
     mov  edx, 3
     mov  r8d, GL_FLOAT
@@ -181,7 +167,6 @@ mesh_upload_attribs:
     mov  ecx, MESH_ATTR_NORMAL
     call qword [glEnableVertexAttribArray]
 
-    ; aUV
     mov  ecx, MESH_ATTR_UV
     mov  edx, 2
     mov  r8d, GL_FLOAT
@@ -197,7 +182,7 @@ mesh_upload_attribs:
     ret
 
 ; ============================================================
-; mesh_create_cube(Mesh* m) → eax
+; mesh_create_cube
 ; ============================================================
 mesh_create_cube:
     push rbx
@@ -253,7 +238,7 @@ mesh_create_cube:
     ret
 
 ; ============================================================
-; mesh_create_pyramid(Mesh* m) → eax
+; mesh_create_pyramid
 ; ============================================================
 mesh_create_pyramid:
     push rbx
@@ -309,7 +294,7 @@ mesh_create_pyramid:
     ret
 
 ; ============================================================
-; mesh_create_crosshair(Mesh* m) → eax
+; mesh_create_crosshair
 ; ============================================================
 mesh_create_crosshair:
     push rbx
@@ -365,7 +350,66 @@ mesh_create_crosshair:
     ret
 
 ; ============================================================
-; mesh_create_sphere(Mesh* m, u32 slices, u32 stacks) → eax
+; mesh_create_skybox
+;   Uses the same cube geometry; drawn from inside with FRONT
+;   faces culled, and a shader that sets gl_Position.z = w so
+;   depth lands at the far plane.
+; ============================================================
+mesh_create_skybox:
+    push rbx
+    sub  rsp, 0x30
+    mov  rbx, rcx
+
+    pxor xmm0, xmm0
+    movdqu [rbx],    xmm0
+    movdqu [rbx+16], xmm0
+
+    mov  ecx, 1
+    lea  rdx, [rbx + MESH_VAO]
+    call qword [glGenVertexArrays]
+    mov  ecx, [rbx + MESH_VAO]
+    call qword [glBindVertexArray]
+
+    mov  ecx, 1
+    lea  rdx, [rbx + MESH_VBO]
+    call qword [glGenBuffers]
+    mov  ecx, GL_ARRAY_BUFFER
+    mov  edx, [rbx + MESH_VBO]
+    call qword [glBindBuffer]
+
+    mov  ecx, GL_ARRAY_BUFFER
+    mov  edx, 24 * MESH_VERTEX_SIZE
+    lea  r8,  [cube_vertices]
+    mov  r9d, GL_STATIC_DRAW
+    call qword [glBufferData]
+
+    mov  rcx, rbx
+    call mesh_upload_attribs
+
+    mov  ecx, 1
+    lea  rdx, [rbx + MESH_EBO]
+    call qword [glGenBuffers]
+    mov  ecx, GL_ELEMENT_ARRAY_BUFFER
+    mov  edx, [rbx + MESH_EBO]
+    call qword [glBindBuffer]
+
+    mov  ecx, GL_ELEMENT_ARRAY_BUFFER
+    mov  edx, 36 * 4
+    lea  r8,  [cube_indices]
+    mov  r9d, GL_STATIC_DRAW
+    call qword [glBufferData]
+
+    mov  dword [rbx + MESH_VERT_COUNT],  24
+    mov  dword [rbx + MESH_INDEX_COUNT], 36
+    mov  dword [rbx + MESH_STRIDE],      MESH_VERTEX_SIZE
+
+    mov  eax, 1
+    add  rsp, 0x30
+    pop  rbx
+    ret
+
+; ============================================================
+; mesh_create_sphere
 ; ============================================================
 mesh_create_sphere:
     push rbx
@@ -446,8 +490,8 @@ mesh_create_sphere:
 
     fld  dword [rsp+0x58]
     fsincos
-    fstp dword [rsp+0x5C]          ; cos_theta
-    fstp dword [rsp+0x60]          ; sin_theta
+    fstp dword [rsp+0x5C]
+    fstp dword [rsp+0x60]
 
     xor  r15d, r15d
 
@@ -465,14 +509,14 @@ mesh_create_sphere:
 
     fld  dword [rsp+0x64]
     fsincos
-    fstp dword [rsp+0x68]          ; cos_phi
-    fstp dword [rsp+0x6C]          ; sin_phi
+    fstp dword [rsp+0x68]
+    fstp dword [rsp+0x6C]
 
     movss xmm0, [rsp+0x60]
-    mulss xmm0, [rsp+0x68]         ; x
-    movss xmm1, [rsp+0x5C]         ; y
+    mulss xmm0, [rsp+0x68]
+    movss xmm1, [rsp+0x5C]
     movss xmm2, [rsp+0x60]
-    mulss xmm2, [rsp+0x6C]         ; z
+    mulss xmm2, [rsp+0x6C]
 
     movss [rdi+0], xmm0
     movss [rdi+4], xmm1
@@ -627,8 +671,6 @@ mesh_create_sphere:
     ret
 
 ; ============================================================
-; mesh_draw(Mesh* m)
-; ============================================================
 mesh_draw:
     push rbx
     sub  rsp, 0x20
@@ -650,8 +692,6 @@ mesh_draw:
     pop  rbx
     ret
 
-; ============================================================
-; mesh_destroy(Mesh* m)
 ; ============================================================
 mesh_destroy:
     push rbx

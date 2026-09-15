@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/main.asm
-; Physics + shadow mapping + point lights + crosshair + normal map
+; Skybox + normal map + shadows + point lights + physics
 ; ============================================================
 BITS 64
 default rel
@@ -77,6 +77,7 @@ extern mesh_create_cube
 extern mesh_create_sphere
 extern mesh_create_pyramid
 extern mesh_create_crosshair
+extern mesh_create_skybox
 extern mesh_draw
 extern mesh_destroy
 
@@ -122,11 +123,13 @@ global WinMain
 section .data
 align 16
 
-window_title db "3dre | Normal Map + Shadows | C/V/B=spawn  Del=remove",0
+window_title db "3dre | Skybox + Normal Map + Shadows",0
 rel_vs_path  db "shaders\basic.vert",0
 rel_fs_path  db "shaders\basic.frag",0
 rel_shadow_vs db "shaders\shadow.vert",0
 rel_shadow_fs db "shaders\shadow.frag",0
+rel_sky_vs   db "shaders\skybox.vert",0
+rel_sky_fs   db "shaders\skybox.frag",0
 rel_png_a    db "assets\test.png",0
 
 u_mvp_name          db "uMVP",0
@@ -151,6 +154,9 @@ u_unlit_name        db "uUnlit",0
 u_shadow_en_name    db "uShadowEnabled",0
 u_light_mvp_name    db "uLightMVP",0
 
+u_sky_vp_name       db "uViewProj",0
+u_sky_cam_name      db "uCameraPos",0
+
 dbg_title       db "3dre Debug",0
 dbg_shader_fail db "Shader failed to load.",0
 
@@ -168,7 +174,6 @@ align 16
 lightA_color:    dd 1.0, 0.15, 0.15
 lightB_color:    dd 0.15, 0.35, 1.0
 
-; ---- light camera setup ----
 align 16
 light_eye:       dd 12.0, 21.0, 15.0
 light_center:    dd 0.0, 0.0, 0.0
@@ -222,16 +227,20 @@ abs_vs_path     resb 260
 abs_fs_path     resb 260
 abs_shadow_vs   resb 260
 abs_shadow_fs   resb 260
+abs_sky_vs      resb 260
+abs_sky_fs      resb 260
 abs_png_a       resb 260
 
 shader_prog     resb SP_SIZE
 shadow_prog     resb SP_SIZE
+skybox_prog     resb SP_SIZE
 shadow_fb       resb FB_SIZE
 
 cube_mesh       resb MESH_SIZE
 sphere_mesh     resb MESH_SIZE
 pyramid_mesh    resb MESH_SIZE
 crosshair_mesh  resb MESH_SIZE
+skybox_mesh     resb MESH_SIZE
 
 tex_slot0       resb TEXTURE_SIZE
 tex_slot1       resb TEXTURE_SIZE
@@ -250,6 +259,8 @@ mat_light_view  resb 64
 mat_light_proj  resb 64
 mat_light_vp    resb 64
 mat_light_mvp   resb 64
+mat_view_no_t   resb 64
+mat_sky_vp      resb 64
 
 dt_seconds      resd 1
 spawn_fwd       resd 3
@@ -258,6 +269,7 @@ spawn_pos       resd 3
 light_angle     resd 1
 lightA_pos      resd 3
 lightB_pos      resd 3
+sky_cam_pos     resd 3
 
 ; ============================================================
 section .text
@@ -416,10 +428,8 @@ update_lights:
     movss xmm0, [rsp+0x00]
     mulss xmm0, [light_orbit_radius]
     movss [lightA_pos + 0], xmm0
-
     movss xmm0, [light_orbit_y]
     movss [lightA_pos + 4], xmm0
-
     movss xmm0, [rsp+0x04]
     mulss xmm0, [light_orbit_radius]
     movss [lightA_pos + 8], xmm0
@@ -429,10 +439,8 @@ update_lights:
     subss xmm1, xmm0
     mulss xmm1, [light_orbit_radius]
     movss [lightB_pos + 0], xmm1
-
     movss xmm0, [light_orbit_y]
     movss [lightB_pos + 4], xmm0
-
     movss xmm0, [rsp+0x04]
     xorps xmm1, xmm1
     subss xmm1, xmm0
@@ -611,6 +619,81 @@ draw_crosshair:
     add  rsp, 0x28
     ret
 
+; ============================================================
+draw_skybox:
+    sub  rsp, 0x28
+
+    ; build rotation-only view (drop translation)
+    lea  rcx, [mat_view]
+    call camera_get_view
+
+    movups xmm0, [mat_view +  0]
+    movups xmm1, [mat_view + 16]
+    movups xmm2, [mat_view + 32]
+    movups [mat_view_no_t +  0], xmm0
+    movups [mat_view_no_t + 16], xmm1
+    movups [mat_view_no_t + 32], xmm2
+
+    mov  dword [mat_view_no_t + 48], 0
+    mov  dword [mat_view_no_t + 52], 0
+    mov  dword [mat_view_no_t + 56], 0
+    mov  dword [mat_view_no_t + 60], 0x3F800000
+
+    ; sky_vp = proj * view_no_translate
+    lea  rcx, [mat_sky_vp]
+    lea  rdx, [mat_proj]
+    lea  r8,  [mat_view_no_t]
+    call mat4_mul
+
+    ; ---- DISABLE depth test & depth write ----
+    mov  ecx, GL_DEPTH_TEST
+    call glDisable
+
+    ; ---- use skybox program ----
+    lea  rcx, [skybox_prog]
+    call shader_program_use
+
+    ; camera position
+    call camera_get_pos
+    movss xmm0, [rcx+0]
+    movss [sky_cam_pos + 0], xmm0
+    movss xmm0, [rcx+4]
+    movss [sky_cam_pos + 4], xmm0
+    movss xmm0, [rcx+8]
+    movss [sky_cam_pos + 8], xmm0
+
+    ; set uniforms
+    lea  rcx, [skybox_prog]
+    lea  rdx, [u_sky_vp_name]
+    lea  r8,  [mat_sky_vp]
+    call shader_set_mat4
+
+    lea  rcx, [skybox_prog]
+    lea  rdx, [u_sky_cam_name]
+    lea  r8,  [sky_cam_pos]
+    call shader_set_vec3
+
+    ; cull front faces (we're inside the cube)
+    mov  ecx, GL_FRONT
+    call glCullFace
+
+    lea  rcx, [skybox_mesh]
+    call mesh_draw
+
+    ; restore culling
+    mov  ecx, GL_BACK
+    call glCullFace
+
+    ; ---- RE-ENABLE depth test ----
+    mov  ecx, GL_DEPTH_TEST
+    call glEnable
+
+    ; back to main shader
+    lea  rcx, [shader_prog]
+    call shader_program_use
+
+    add  rsp, 0x28
+    ret
 ; ============================================================
 render_shadow_pass:
     push rbx
@@ -819,6 +902,10 @@ WinMain:
 
 .exit:
     call image_shutdown
+    lea  rcx, [skybox_mesh]
+    call mesh_destroy
+    lea  rcx, [skybox_prog]
+    call shader_program_destroy
     lea  rcx, [tex_normal]
     call texture_destroy
     lea  rcx, [shadow_fb]
@@ -895,7 +982,7 @@ WndProc:
 .deactivate:
     call  input_disable_mouse_look
     add  rsp, 0x28
-    xor  eax, eax
+    xor   eax, eax
     ret
 
 .keydown:
@@ -958,6 +1045,16 @@ renderer_init:
     mov  r8d, 260
     call path_join_exe
 
+    lea  rcx, [rel_sky_vs]
+    lea  rdx, [abs_sky_vs]
+    mov  r8d, 260
+    call path_join_exe
+
+    lea  rcx, [rel_sky_fs]
+    lea  rdx, [abs_sky_fs]
+    mov  r8d, 260
+    call path_join_exe
+
     ; ---- main program ----
     lea  rcx, [shader_prog]
     lea  rdx, [abs_vs_path]
@@ -977,6 +1074,12 @@ renderer_init:
     lea  r8,  [abs_shadow_fs]
     call shader_program_init
 
+    ; ---- skybox program ----
+    lea  rcx, [skybox_prog]
+    lea  rdx, [abs_sky_vs]
+    lea  r8,  [abs_sky_fs]
+    call shader_program_init
+
     ; ---- meshes ----
     lea  rcx, [cube_mesh]
     call mesh_create_cube
@@ -988,6 +1091,8 @@ renderer_init:
     call mesh_create_pyramid
     lea  rcx, [crosshair_mesh]
     call mesh_create_crosshair
+    lea  rcx, [skybox_mesh]
+    call mesh_create_skybox
 
     ; ---- textures ----
     lea  rcx, [rel_png_a]
@@ -1143,6 +1248,21 @@ renderer_draw:
     mov  ecx, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
     call glClear
 
+    ; ---- camera matrices (needed by skybox) ----
+    lea  rcx, [mat_proj]
+    call camera_get_proj
+
+    lea  rcx, [mat_view]
+    call camera_get_view
+
+    lea  rcx, [mat_pv]
+    lea  rdx, [mat_proj]
+    lea  r8,  [mat_view]
+    call mat4_mul
+
+    ; ---- skybox first (behind everything) ----
+    call draw_skybox
+
     ; ---- bind shadow map on unit 1 ----
     mov  eax, [shadow_fb + FB_DEPTH_TEX]
     mov  [rsp+0x10], eax
@@ -1150,7 +1270,7 @@ renderer_draw:
     mov  dword [rsp+0x18], 0
     mov  dword [rsp+0x1C], 0
     lea  rcx, [rsp+0x10]
-    mov  edx, 0x84C1              ; GL_TEXTURE1
+    mov  edx, 0x84C1
     call texture_bind
 
     ; ---- bind normal map on unit 2 ----
@@ -1160,10 +1280,10 @@ renderer_draw:
     mov  dword [rsp+0x18], 0
     mov  dword [rsp+0x1C], 0
     lea  rcx, [rsp+0x10]
-    mov  edx, 0x84C2              ; GL_TEXTURE2
+    mov  edx, 0x84C2
     call texture_bind
 
-    ; camera + lights
+    ; ---- camera pos + lights uniforms ----
     call camera_get_pos
     mov  r8, rcx
     lea  rcx, [shader_prog]
@@ -1178,16 +1298,6 @@ renderer_draw:
     lea  rdx, [u_lightB_pos_name]
     lea  r8,  [lightB_pos]
     call shader_set_vec3
-
-    ; camera matrices
-    lea  rcx, [mat_proj]
-    call camera_get_proj
-    lea  rcx, [mat_view]
-    call camera_get_view
-    lea  rcx, [mat_pv]
-    lea  rdx, [mat_proj]
-    lea  r8,  [mat_view]
-    call mat4_mul
 
     ; ---- ground ----
     lea  rcx, [mat_tmp]
@@ -1217,7 +1327,6 @@ renderer_draw:
     lea  r8,  [mat_model]
     call mat4_mul
 
-    ; bind tex_slot1 on unit 0
     mov  eax, [tex_slot1 + TEX_ID]
     mov  [rsp+0x10], eax
     mov  dword [rsp+0x14], 0
