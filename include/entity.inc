@@ -24,7 +24,8 @@
 ;   +52  f32  vel_y
 ;   +56  f32  vel_z
 ;   +60  u32  pad1
-
+; Static / dynamic flag (optional, not used yet)
+%define E_FLAG_STATIC  0x0001
 %define E_TYPE              0
 %define E_FLAGS             4
 %define E_POS               8
@@ -34,6 +35,7 @@
 %define E_COLOR             32
 %define E_TEXTURE           44
 %define E_VEL               48
+%define E_HALF_H            60
 %define E_PAD1              60
 
 %define E_TYPE_EMPTY        0xFFFFFFFF

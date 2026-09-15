@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/main.asm
-; Entities + runtime spawn (C/V/B) + destroy (Delete)
+; Physics demo: entities fall under gravity, bounce off ground
 ; ============================================================
 BITS 64
 default rel
@@ -51,6 +51,7 @@ extern cam_pitch
 extern mat4_mul
 extern mat4_make_translate
 extern mat4_make_rotate_y
+extern mat4_make_scale
 
 extern path_join_exe
 
@@ -106,7 +107,7 @@ global WinMain
 section .data
 align 16
 
-window_title db "3dre | C=spawn cube  V=sphere  B=pyramid  Del=remove last",0
+window_title db "3dre Physics | C/V/B=spawn  Del=remove  WASD+QE/RF=move",0
 rel_vs_path  db "shaders\basic.vert",0
 rel_fs_path  db "shaders\basic.frag",0
 rel_png_a    db "assets\test.png",0
@@ -132,16 +133,27 @@ ambient_level    dd 0.25
 spec_color       dd 1.0, 1.0, 1.0
 shininess        dd 64.0
 
+; ---- Ground settings ----
+ground_pos_y:    dd -4.05
+ground_scale_x:  dd 20.0
+ground_scale_y:  dd 0.1
+ground_scale_z:  dd 20.0
+ground_color:    dd 0.30, 0.32, 0.36
+
+; ---- Spawn velocity: forward * this ----
+spawn_forward_speed: dd 3.0
+
+; ---- Initial spawn: entities start above ground and fall ----
 align 16
 spawn_list:
-    dd E_TYPE_CUBE,    0,   -3.0,  1.5, -1.0,   0.8,   1.0, 1.0, 1.0
-    dd E_TYPE_CUBE,    1,    3.0,  1.5, -1.0,   0.6,   0.3, 1.0, 0.3
-    dd E_TYPE_PYRAMID, 0,   -3.0, -1.5,  1.0,   0.7,   1.0, 1.0, 1.0
-    dd E_TYPE_PYRAMID, 1,    3.0, -1.5,  1.0,   0.5,   1.0, 1.0, 0.3
-    dd E_TYPE_SPHERE,  0,   -4.0,  0.0,  0.0,   0.9,   1.0, 1.0, 1.0
-    dd E_TYPE_SPHERE,  1,    0.0,  2.5,  0.0,   1.2,   0.9, 0.9, 0.95
-    dd E_TYPE_SPHERE,  0,    4.0,  0.0,  0.0,   0.9,   1.0, 1.0, 1.0
-    dd E_TYPE_SPHERE,  1,    0.0, -2.5,  0.0,   1.2,   0.5, 0.7, 1.0
+    dd E_TYPE_CUBE,    0,   -3.0,  2.0, -1.0,   0.8,   1.0, 1.0, 1.0
+    dd E_TYPE_CUBE,    1,    3.0,  3.0, -1.0,   0.6,   0.3, 1.0, 0.3
+    dd E_TYPE_PYRAMID, 0,   -3.0,  4.0,  1.0,   0.7,   1.0, 1.0, 1.0
+    dd E_TYPE_PYRAMID, 1,    3.0,  2.5,  1.0,   0.5,   1.0, 1.0, 0.3
+    dd E_TYPE_SPHERE,  0,   -4.0,  5.0,  0.0,   0.9,   1.0, 1.0, 1.0
+    dd E_TYPE_SPHERE,  1,    0.0,  6.0,  0.0,   1.2,   0.9, 0.9, 0.95
+    dd E_TYPE_SPHERE,  0,    4.0,  3.5,  0.0,   0.9,   1.0, 1.0, 1.0
+    dd E_TYPE_SPHERE,  1,    0.0,  4.5,  0.0,   1.2,   0.5, 0.7, 1.0
 
 NUM_SPAWNS equ 8
 SPAWN_SIZE equ 36
@@ -149,6 +161,8 @@ SPAWN_SIZE equ 36
 align 16
 f_1_0:      dd 1.0
 f_4_0:      dd 4.0
+
+align 16
 bg_rgb:     dd 0.12
 
 ; ============================================================
@@ -232,9 +246,8 @@ set_light_uniforms:
     ret
 
 ; ============================================================
-; spawn_at_camera(type) — spawn 4 units ahead of the camera
+; spawn_at_camera(type)  — spawn 4 units ahead with forward velocity
 ;   ecx = E_TYPE_*
-;   Computes forward vector inline to avoid extra calls
 ; ============================================================
 spawn_at_camera:
     push rbx
@@ -288,6 +301,21 @@ spawn_at_camera:
     addss xmm0, [cam_pos + 8]
     movss [spawn_pos + 8], xmm0
 
+    ; ---- velocity = fwd * spawn_forward_speed ----
+    movss xmm7, [spawn_forward_speed]
+
+    movss xmm7, [spawn_fwd + 0]
+    mulss xmm7, [spawn_forward_speed]
+    ; xmm7 = vel.x
+
+    movss xmm8, [spawn_fwd + 4]
+    mulss xmm8, [spawn_forward_speed]
+    ; xmm8 = vel.y
+
+    movss xmm9, [spawn_fwd + 8]
+    mulss xmm9, [spawn_forward_speed]
+    ; xmm9 = vel.z
+
     ; ---- spawn args ----
     movss xmm0, [spawn_pos + 0]
     movss xmm1, [spawn_pos + 4]
@@ -298,6 +326,7 @@ spawn_at_camera:
     movd xmm4, eax                 ; r
     movd xmm5, eax                 ; g
     movd xmm6, eax                 ; b
+    ; xmm7..xmm9 = velocity (already set)
 
     mov  edx, [tex_slot0 + TEX_ID]
 
@@ -324,8 +353,6 @@ spawn_at_camera:
     pop  rbx
     ret
 
-; ============================================================
-; handle_entity_input()
 ; ============================================================
 handle_entity_input:
     sub  rsp, 0x28
@@ -628,6 +655,7 @@ renderer_init:
 
     call entity_init
 
+    ; ---- initial spawn: entities above ground, velocity = 0 ----
     lea  rbx, [spawn_list]
     mov  r12d, NUM_SPAWNS
 
@@ -650,6 +678,11 @@ renderer_init:
     movss xmm4, [rbx + 24]
     movss xmm5, [rbx + 28]
     movss xmm6, [rbx + 32]
+
+    ; velocity = 0
+    xorps xmm7, xmm7
+    xorps xmm8, xmm8
+    xorps xmm9, xmm9
 
     cmp  eax, E_TYPE_CUBE
     je   .spawn_cube
@@ -741,6 +774,66 @@ renderer_draw:
     lea  r8,  [mat_view]
     call mat4_mul
 
+    ; ============================================
+    ; Draw ground (scaled cube at y = -4.05)
+    ; ============================================
+    ; mat_tmp = T(0, ground_pos_y, 0)
+    lea  rcx, [mat_tmp]
+    xorps xmm0, xmm0
+    movss xmm1, [ground_pos_y]
+    xorps xmm2, xmm2
+    call mat4_make_translate
+
+    ; mat_tmp2 = S(20, 0.1, 20)
+    lea  rcx, [mat_tmp2]
+    movss xmm0, [ground_scale_x]
+    movss xmm1, [ground_scale_y]
+    movss xmm2, [ground_scale_z]
+    call mat4_make_scale
+
+    ; mat_model = T * S
+    lea  rcx, [mat_model]
+    lea  rdx, [mat_tmp]
+    lea  r8,  [mat_tmp2]
+    call mat4_mul
+
+    ; mat_mvp = pv * model
+    lea  rcx, [mat_mvp]
+    lea  rdx, [mat_pv]
+    lea  r8,  [mat_model]
+    call mat4_mul
+
+    ; bind slot1 texture
+    mov  eax, [tex_slot1 + TEX_ID]
+    mov  [rsp+0x10], eax
+    mov  dword [rsp+0x14], 0
+    mov  dword [rsp+0x18], 0
+    mov  dword [rsp+0x1C], 0
+    lea  rcx, [rsp+0x10]
+    mov  edx, GL_TEXTURE0
+    call texture_bind
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_mvp_name]
+    lea  r8,  [mat_mvp]
+    call shader_set_mat4
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_model_name]
+    lea  r8,  [mat_model]
+    call shader_set_mat4
+
+    lea  rcx, [shader_prog]
+    lea  rdx, [u_color_name]
+    lea  r8,  [ground_color]
+    call shader_set_vec3
+
+    lea  rcx, [cube_mesh]
+    call mesh_draw
+
+    ; ============================================
+    ; Draw entities
+    ; ============================================
     lea  rbx, [entities]
     mov  r12d, MAX_ENTITIES
 
