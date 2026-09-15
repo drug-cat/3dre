@@ -19,7 +19,7 @@
 ;   +32  f32  color_r
 ;   +36  f32  color_g
 ;   +40  f32  color_b
-;   +44  u32  pad0
+;   +44  u32  texture         (GL texture id, 0 = none)
 ;   +48  f32  vel_x
 ;   +52  f32  vel_y
 ;   +56  f32  vel_z
@@ -32,12 +32,13 @@
 %define E_ROT_SPEED         24
 %define E_SCALE             28
 %define E_COLOR             32
-%define E_PAD0              44
+%define E_TEXTURE           44
 %define E_VEL               48
 %define E_PAD1              60
 
 %define E_TYPE_EMPTY        0xFFFFFFFF
 %define E_TYPE_CUBE         0
 %define E_TYPE_SPHERE       1
+%define E_TYPE_PYRAMID      2
 
 %endif

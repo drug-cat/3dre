@@ -55,7 +55,33 @@
 %define WGL_CONTEXT_PROFILE_MASK_ARB      0x9126
 %define WGL_CONTEXT_CORE_PROFILE_BIT_ARB  0x00000001
 %define WGL_CONTEXT_FLAGS_ARB             0x2094
+; ---- Textures ----
+%define GL_TEXTURE_2D            0x0DE1
+%define GL_TEXTURE0              0x84C0
+%define GL_TEXTURE1              0x84C1
+%define GL_RGB                   0x1907
+%define GL_RGBA                  0x1908
+%define GL_RED                   0x1903
+%define GL_NEAREST               0x2600
+%define GL_LINEAR                0x2601
+%define GL_NEAREST_MIPMAP_NEAREST 0x2700
+%define GL_LINEAR_MIPMAP_LINEAR  0x2703
+%define GL_REPEAT                0x2901
+%define GL_CLAMP_TO_EDGE         0x812F
+%define GL_TEXTURE_WRAP_S        0x2802
+%define GL_TEXTURE_WRAP_T        0x2803
+%define GL_TEXTURE_MIN_FILTER    0x2801
+%define GL_TEXTURE_MAG_FILTER    0x2800
+%define GL_UNPACK_ALIGNMENT      0x0CF5
+%define GL_PIXEL_UNPACK_BUFFER   0x88EC
+%define GL_BGRA   0x80E1
 
+; ---- GL 1.1 texture functions (direct from opengl32.dll) ----
+extern glGenTextures
+extern glDeleteTextures
+extern glBindTexture
+extern glTexImage2D
+extern glTexParameteri
 ; ---- GL 1.1 exports from opengl32.dll ----
 extern glClear
 extern glClearColor

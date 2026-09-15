@@ -2,6 +2,7 @@
 ; src/core/math.asm
 ; vec3 / mat4 math with SSE2 + x87 for trig
 ; Column-major layout (matches OpenGL)
+; All memory accesses use movups (no alignment requirement).
 ; ============================================================
 BITS 64
 default rel
@@ -45,7 +46,7 @@ mat4_mul:
     movups xmm2, [rdx+32]
     movups xmm3, [rdx+48]
 
-    ; column 0 of b
+    ; ---- column 0 of b ----
     movups xmm4, [r8]
     movaps xmm5, xmm4
     shufps xmm4, xmm4, 0x00
@@ -53,17 +54,17 @@ mat4_mul:
     shufps xmm5, xmm5, 0x55
     mulps  xmm5, xmm1
     addps  xmm4, xmm5
-    movaps xmm5, [r8]
+    movups xmm5, [r8]
     shufps xmm5, xmm5, 0xAA
     mulps  xmm5, xmm2
     addps  xmm4, xmm5
-    movaps xmm5, [r8]
+    movups xmm5, [r8]
     shufps xmm5, xmm5, 0xFF
     mulps  xmm5, xmm3
     addps  xmm4, xmm5
     movups [rcx], xmm4
 
-    ; column 1 of b
+    ; ---- column 1 of b ----
     movups xmm4, [r8+16]
     movaps xmm5, xmm4
     shufps xmm4, xmm4, 0x00
@@ -71,17 +72,17 @@ mat4_mul:
     shufps xmm5, xmm5, 0x55
     mulps  xmm5, xmm1
     addps  xmm4, xmm5
-    movaps xmm5, [r8+16]
+    movups xmm5, [r8+16]
     shufps xmm5, xmm5, 0xAA
     mulps  xmm5, xmm2
     addps  xmm4, xmm5
-    movaps xmm5, [r8+16]
+    movups xmm5, [r8+16]
     shufps xmm5, xmm5, 0xFF
     mulps  xmm5, xmm3
     addps  xmm4, xmm5
     movups [rcx+16], xmm4
 
-    ; column 2 of b
+    ; ---- column 2 of b ----
     movups xmm4, [r8+32]
     movaps xmm5, xmm4
     shufps xmm4, xmm4, 0x00
@@ -89,17 +90,17 @@ mat4_mul:
     shufps xmm5, xmm5, 0x55
     mulps  xmm5, xmm1
     addps  xmm4, xmm5
-    movaps xmm5, [r8+32]
+    movups xmm5, [r8+32]
     shufps xmm5, xmm5, 0xAA
     mulps  xmm5, xmm2
     addps  xmm4, xmm5
-    movaps xmm5, [r8+32]
+    movups xmm5, [r8+32]
     shufps xmm5, xmm5, 0xFF
     mulps  xmm5, xmm3
     addps  xmm4, xmm5
     movups [rcx+32], xmm4
 
-    ; column 3 of b
+    ; ---- column 3 of b ----
     movups xmm4, [r8+48]
     movaps xmm5, xmm4
     shufps xmm4, xmm4, 0x00
@@ -107,11 +108,11 @@ mat4_mul:
     shufps xmm5, xmm5, 0x55
     mulps  xmm5, xmm1
     addps  xmm4, xmm5
-    movaps xmm5, [r8+48]
+    movups xmm5, [r8+48]
     shufps xmm5, xmm5, 0xAA
     mulps  xmm5, xmm2
     addps  xmm4, xmm5
-    movaps xmm5, [r8+48]
+    movups xmm5, [r8+48]
     shufps xmm5, xmm5, 0xFF
     mulps  xmm5, xmm3
     addps  xmm4, xmm5
@@ -121,7 +122,7 @@ mat4_mul:
 
 ; ============================================================
 ; void mat4_make_translate(float* dst, float x, float y, float z)
-;   xmm0=x, xmm1=y, xmm2=z
+;   xmm0 = x, xmm1 = y, xmm2 = z
 ; ============================================================
 global mat4_make_translate
 mat4_make_translate:
@@ -176,11 +177,11 @@ mat4_make_rotate_x:
 
     fld  dword [rsp]
     fsincos
-    fstp dword [rsp+4]            ; cos
-    fstp dword [rsp+8]            ; sin
+    fstp dword [rsp+4]
+    fstp dword [rsp+8]
 
-    movss xmm1, [rsp+4]           ; c
-    movss xmm2, [rsp+8]           ; s
+    movss xmm1, [rsp+4]
+    movss xmm2, [rsp+8]
     xorps xmm3, xmm3
     movss xmm6, [c_one]
 
@@ -224,11 +225,11 @@ mat4_make_rotate_y:
 
     fld  dword [rsp]
     fsincos
-    fstp dword [rsp+4]            ; cos
-    fstp dword [rsp+8]            ; sin
+    fstp dword [rsp+4]
+    fstp dword [rsp+8]
 
-    movss xmm1, [rsp+4]           ; c
-    movss xmm2, [rsp+8]           ; s
+    movss xmm1, [rsp+4]
+    movss xmm2, [rsp+8]
     xorps xmm3, xmm3
     movss xmm6, [c_one]
 
@@ -237,7 +238,7 @@ mat4_make_rotate_y:
     movss [rcx+4],  xmm3
     movss xmm4, xmm2
     xorps xmm5, xmm5
-    subss xmm5, xmm4              ; -s
+    subss xmm5, xmm4
     movss [rcx+8],  xmm5
     movss [rcx+12], xmm3
 
@@ -270,17 +271,16 @@ global mat4_make_perspective
 mat4_make_perspective:
     sub  rsp, 0x28
 
-    ; fovy_half = fovy * 0.5
     movss xmm4, xmm0
     mulss xmm4, [c_half]
     movss [rsp], xmm4
 
     fld  dword [rsp]
     fsincos
-    fstp dword [rsp+4]            ; cos
-    fstp dword [rsp+8]            ; sin
+    fstp dword [rsp+4]
+    fstp dword [rsp+8]
     movss xmm5, [rsp+4]
-    divss xmm5, [rsp+8]           ; f = cot(fovy/2)
+    divss xmm5, [rsp+8]
     movss [rsp+12], xmm5
 
     xorps xmm6, xmm6
@@ -306,7 +306,7 @@ mat4_make_perspective:
     movss xmm7, xmm3
     addss xmm7, xmm2
     movss xmm8, xmm2
-    subss xmm8, xmm3              ; near - far
+    subss xmm8, xmm3
     divss xmm7, xmm8
     movss [rcx+40], xmm7
     movss xmm9, [c_neg_one]
@@ -316,8 +316,8 @@ mat4_make_perspective:
     movss [rcx+48], xmm6
     movss [rcx+52], xmm6
     movss xmm7, xmm3
-    mulss xmm7, xmm2              ; far*near
-    addss xmm7, xmm7              ; 2*far*near
+    mulss xmm7, xmm2
+    addss xmm7, xmm7
     divss xmm7, xmm8
     movss [rcx+56], xmm7
     movss [rcx+60], xmm6

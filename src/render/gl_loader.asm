@@ -36,6 +36,7 @@ global glUniformMatrix4fv
 global glUniform1f
 global glUniform3f
 global glUniform4f
+global glUniform1i
 
 ; ---- VAO / VBO / EBO ----
 global glGenVertexArrays
@@ -50,6 +51,9 @@ global glDeleteBuffers
 global glVertexAttribPointer
 global glEnableVertexAttribArray
 global glDisableVertexAttribArray
+
+; ---- Texture functions (loaded, not directly exported) ----
+global glActiveTexture
 
 ; ---- Draw calls ----
 global glDrawArrays
@@ -75,6 +79,7 @@ glUniformMatrix4fv        resq 1
 glUniform1f               resq 1
 glUniform3f               resq 1
 glUniform4f               resq 1
+glUniform1i               resq 1
 
 glGenVertexArrays         resq 1
 glBindVertexArray         resq 1
@@ -87,6 +92,8 @@ glDeleteBuffers           resq 1
 glVertexAttribPointer     resq 1
 glEnableVertexAttribArray resq 1
 glDisableVertexAttribArray resq 1
+
+glActiveTexture           resq 1
 
 glDrawArrays              resq 1
 glDrawElements            resq 1
@@ -113,6 +120,7 @@ n_UniformMatrix4fv        db "glUniformMatrix4fv",0
 n_Uniform1f               db "glUniform1f",0
 n_Uniform3f               db "glUniform3f",0
 n_Uniform4f               db "glUniform4f",0
+n_Uniform1i               db "glUniform1i",0
 
 n_GenVertexArrays         db "glGenVertexArrays",0
 n_BindVertexArray         db "glBindVertexArray",0
@@ -126,11 +134,13 @@ n_VertexAttribPointer     db "glVertexAttribPointer",0
 n_EnableVertexAttribArray db "glEnableVertexAttribArray",0
 n_DisableVertexAttribArray db "glDisableVertexAttribArray",0
 
+n_ActiveTexture           db "glActiveTexture",0
+
 n_DrawArrays              db "glDrawArrays",0
 n_DrawElements            db "glDrawElements",0
 
 align 8
-; ---- Table of { name_ptr, storage_ptr } ----
+; ---- Table of { name_ptr, storage_ptr } pairs ----
 func_table:
     dq n_CreateShader,            glCreateShader
     dq n_ShaderSource,            glShaderSource
@@ -152,6 +162,7 @@ func_table:
     dq n_Uniform1f,               glUniform1f
     dq n_Uniform3f,               glUniform3f
     dq n_Uniform4f,               glUniform4f
+    dq n_Uniform1i,               glUniform1i
 
     dq n_GenVertexArrays,         glGenVertexArrays
     dq n_BindVertexArray,         glBindVertexArray
@@ -165,6 +176,8 @@ func_table:
     dq n_EnableVertexAttribArray, glEnableVertexAttribArray
     dq n_DisableVertexAttribArray, glDisableVertexAttribArray
 
+    dq n_ActiveTexture,           glActiveTexture
+
     dq n_DrawArrays,              glDrawArrays
     dq n_DrawElements,            glDrawElements
 
@@ -174,9 +187,7 @@ func_table:
 section .text
 
 ; ============================================================
-; gl_load_functions
-; Loads every function pointer via wglGetProcAddress.
-; Returns: eax = 1 on success, 0 on failure
+; gl_load_functions() → eax = 1 on success, 0 on failure
 ; ============================================================
 global gl_load_functions
 gl_load_functions:
@@ -186,7 +197,7 @@ gl_load_functions:
 
     lea  rbx, [func_table]
 .loop:
-    mov  rsi, [rbx]                ; rsi = name ptr
+    mov  rsi, [rbx]
     test rsi, rsi
     jz   .success
 
@@ -195,7 +206,7 @@ gl_load_functions:
     test rax, rax
     jz   .fail
 
-    mov  rdx, [rbx+8]              ; &storage
+    mov  rdx, [rbx+8]
     mov  [rdx], rax
     add  rbx, 16
     jmp  .loop
@@ -211,5 +222,5 @@ gl_load_functions:
     xor  eax, eax
     add  rsp, 0x20
     pop  rsi
-    pop  rbx
+  pop  rbx
     ret

@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/scene/entity.asm
-; Lightweight entity slots with type/position/rotation/color
+; Lightweight entity slots with type/position/rotation/texture
 ; ============================================================
 BITS 64
 default rel
@@ -16,6 +16,7 @@ section .text
 global entity_init
 global entity_spawn_cube
 global entity_spawn_sphere
+global entity_spawn_pyramid
 global entity_destroy
 global entity_update_all
 
@@ -34,23 +35,28 @@ entity_init:
 ; ============================================================
 ; entity_spawn_cube(x, y, z, rot_speed, r, g, b) → rax = index or -1
 ;   xmm0..xmm2 = position
-;   xmm3       = rotation speed (rad/s)
-;   xmm4..xmm6 = color tint (r, g, b)
+;   xmm3       = rotation speed
+;   xmm4..xmm6 = color tint
+;   edx        = GL texture id (0 = none)
 ; ============================================================
 entity_spawn_cube:
     mov  ecx, E_TYPE_CUBE
     jmp  entity_spawn_internal
 
 ; ============================================================
-; entity_spawn_sphere(x, y, z, rot_speed, r, g, b) → rax
-; ============================================================
 entity_spawn_sphere:
     mov  ecx, E_TYPE_SPHERE
     jmp  entity_spawn_internal
 
 ; ============================================================
+entity_spawn_pyramid:
+    mov  ecx, E_TYPE_PYRAMID
+    jmp  entity_spawn_internal
+
+; ============================================================
 ; entity_spawn_internal:
 ;   ecx = type
+;   edx = texture id (0 = none)
 ;   xmm0..xmm2 = position
 ;   xmm3       = rot_speed
 ;   xmm4..xmm6 = color
@@ -60,14 +66,18 @@ entity_spawn_internal:
     push rbx
     sub  rsp, 0x20
 
+    ; save type and texture across the loop
+    mov  r8d, ecx                  ; type
+    mov  r9d, edx                  ; texture id
+
     lea  rbx, [entities]
-    mov  r8d, MAX_ENTITIES
+    mov  r10d, MAX_ENTITIES
 
 .find:
     cmp  dword [rbx + E_TYPE], E_TYPE_EMPTY
     je   .found
     add  rbx, ENTITY_SIZE
-    dec  r8d
+    dec  r10d
     jnz  .find
 
     mov  rax, -1
@@ -76,35 +86,43 @@ entity_spawn_internal:
     ret
 
 .found:
-    mov  dword [rbx + E_TYPE], ecx
+    ; ---- type / flags ----
+    mov  dword [rbx + E_TYPE], r8d
     mov  dword [rbx + E_FLAGS], 0
 
+    ; ---- position ----
     movss [rbx + E_POS + 0], xmm0
     movss [rbx + E_POS + 4], xmm1
     movss [rbx + E_POS + 8], xmm2
 
+    ; ---- rotation ----
     xorps xmm7, xmm7
     movss [rbx + E_ROT_Y], xmm7
     movss [rbx + E_ROT_SPEED], xmm3
 
-    mov  eax, 0x3F800000           ; 1.0f
+    ; ---- scale = 1.0 ----
+    mov  eax, 0x3F800000
     mov  dword [rbx + E_SCALE], eax
 
+    ; ---- color ----
     movss [rbx + E_COLOR + 0], xmm4
     movss [rbx + E_COLOR + 4], xmm5
     movss [rbx + E_COLOR + 8], xmm6
-    mov  dword [rbx + E_PAD0], 0
 
+    ; ---- texture ----
+    mov  dword [rbx + E_TEXTURE], r9d
+
+    ; ---- velocity = 0 ----
     mov  dword [rbx + E_VEL + 0], 0
     mov  dword [rbx + E_VEL + 4], 0
     mov  dword [rbx + E_VEL + 8], 0
     mov  dword [rbx + E_PAD1], 0
 
-    ; index = (rbx - &entities) >> 6   (ENTITY_SIZE = 64)
+    ; ---- compute index ----
     lea  rcx, [entities]
     mov  rax, rbx
     sub  rax, rcx
-    shr  rax, 6
+    shr  rax, 6                    ; / 64
 
     add  rsp, 0x20
     pop  rbx
@@ -117,7 +135,7 @@ entity_destroy:
     cmp  ecx, MAX_ENTITIES
     jae  .done
     mov  eax, ecx
-    shl  eax, 6                    ; * 64
+    shl  eax, 6
     lea  rdx, [entities]
     add  rdx, rax
     mov  dword [rdx + E_TYPE], E_TYPE_EMPTY

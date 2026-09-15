@@ -3,8 +3,11 @@
 in vec3 vColor;
 in vec3 vNormal;
 in vec3 vWorldPos;
+in vec2 vUV;
 
-uniform vec3  uColor;            // per-entity tint multiplier
+uniform sampler2D uAlbedo;
+
+uniform vec3  uColor;
 uniform vec3  uLightDir;
 uniform vec3  uLightColor;
 uniform float uAmbient;
@@ -17,7 +20,9 @@ out vec4 FragColor;
 
 void main()
 {
-    vec3 base = vColor * uColor;  // tinted base color
+    vec3 tex   = texture(uAlbedo, vUV).rgb;
+    vec3 base  = vColor * uColor * tex;
+
     vec3 N = normalize(vNormal);
     vec3 L = normalize(uLightDir);
     vec3 V = normalize(uCameraPos - vWorldPos);
