@@ -7,6 +7,7 @@ in vec2 vUV;
 in vec4 vLightSpacePos;
 
 uniform sampler2D uAlbedo;
+uniform sampler2D uNormalMap;
 uniform sampler2D uShadowMap;
 
 uniform vec3  uColor;
@@ -26,8 +27,35 @@ uniform float uPointIntensity;
 
 uniform float uUnlit;
 uniform float uShadowEnabled;
+uniform float uNormalStrength;      // 0 = off, 1 = full
 
 out vec4 FragColor;
+
+vec3 applyNormalMap(vec3 N, vec3 worldPos, vec2 uv)
+{
+    if (uNormalStrength < 0.001) return N;
+
+    vec3 nT = texture(uNormalMap, uv * 4.0).rgb * 2.0 - 1.0;
+    nT.xy *= uNormalStrength;
+
+    // Reconstruct TBN from screen-space derivatives
+    vec3 dp1  = dFdx(worldPos);
+    vec3 dp2  = dFdy(worldPos);
+    vec2 duv1 = dFdx(uv * 4.0);
+    vec2 duv2 = dFdy(uv * 4.0);
+
+    vec3 dp2perp = cross(dp2, N);
+    vec3 dp1perp = cross(N, dp1);
+    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+
+    float invLen = inversesqrt(max(dot(T, T), 1e-8));
+    T *= invLen;
+    invLen = inversesqrt(max(dot(B, B), 1e-8));
+    B *= invLen;
+
+    return normalize(mat3(T, B, N) * nT);
+}
 
 float computeShadow()
 {
@@ -60,9 +88,11 @@ void main()
     vec3 base = vColor * uColor * tex;
 
     vec3 N = normalize(vNormal);
+    N = applyNormalMap(N, vWorldPos, vUV);
+
     vec3 V = normalize(uCameraPos - vWorldPos);
 
-    // Directional sun (with shadow)
+    // Directional sun
     vec3  L    = normalize(uSunDir);
     float ndl  = max(dot(N, L), 0.0);
     vec3  H    = normalize(L + V);
