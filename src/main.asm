@@ -1,6 +1,6 @@
 ; ============================================================
 ; src/main.asm
-; Skybox + normal map + shadows + point lights + physics
+; Skybox + normal map + shadows + point lights + save/load
 ; ============================================================
 BITS 64
 default rel
@@ -62,6 +62,9 @@ extern mat4_make_ortho
 extern mat4_make_look_at
 
 extern path_join_exe
+extern file_read
+extern file_write
+extern file_free
 
 extern shader_program_init
 extern shader_program_hot_reload
@@ -93,6 +96,8 @@ extern entity_spawn_sphere
 extern entity_spawn_pyramid
 extern entity_destroy_last
 extern entity_update_all
+extern entity_save_to_buffer
+extern entity_load_from_buffer
 extern entities
 
 extern framebuffer_create_shadow
@@ -123,7 +128,10 @@ global WinMain
 section .data
 align 16
 
-window_title db "3dre | Skybox + Normal Map + Shadows",0
+VK_F5 equ 0x74
+VK_F9 equ 0x78
+
+window_title db "3dre | F5=save  F9=load  C/V/B=spawn  Del=remove",0
 rel_vs_path  db "shaders\basic.vert",0
 rel_fs_path  db "shaders\basic.frag",0
 rel_shadow_vs db "shaders\shadow.vert",0
@@ -131,6 +139,7 @@ rel_shadow_fs db "shaders\shadow.frag",0
 rel_sky_vs   db "shaders\skybox.vert",0
 rel_sky_fs   db "shaders\skybox.frag",0
 rel_png_a    db "assets\test.png",0
+rel_save_path db "scene.sav",0
 
 u_mvp_name          db "uMVP",0
 u_model_name        db "uModel",0
@@ -230,6 +239,7 @@ abs_shadow_fs   resb 260
 abs_sky_vs      resb 260
 abs_sky_fs      resb 260
 abs_png_a       resb 260
+abs_save_path   resb 260
 
 shader_prog     resb SP_SIZE
 shadow_prog     resb SP_SIZE
@@ -270,6 +280,8 @@ light_angle     resd 1
 lightA_pos      resd 3
 lightB_pos      resd 3
 sky_cam_pos     resd 3
+
+save_buf        resb 8192
 
 ; ============================================================
 section .text
@@ -355,19 +367,16 @@ set_static_uniforms:
     call qword [glUniform1i]
 .skip_nmap:
 
-    ; uNormalStrength = 1.0
     lea  rcx, [shader_prog]
     lea  rdx, [u_normal_str_name]
     movss xmm2, [f_1_0]
     call shader_set_float
 
-    ; uShadowEnabled = 1
     lea  rcx, [shader_prog]
     lea  rdx, [u_shadow_en_name]
     movss xmm2, [f_1_0]
     call shader_set_float
 
-    ; uUnlit = 0
     lea  rcx, [shader_prog]
     lea  rdx, [u_unlit_name]
     xorps xmm2, xmm2
@@ -581,6 +590,112 @@ handle_entity_input:
     ret
 
 ; ============================================================
+; save_scene — 36-byte header + N * 68 payload
+; ============================================================
+save_scene:
+    push rbx
+    sub  rsp, 0x30
+
+    lea  rcx, [rel_save_path]
+    lea  rdx, [abs_save_path]
+    mov  r8d, 260
+    call path_join_exe
+
+    ; pack entities at save_buf + 36
+    lea  rcx, [save_buf + 36]
+    call entity_save_to_buffer
+    mov  rbx, rax
+
+    ; header
+    mov  dword [save_buf + 0], 0x45524433
+    mov  dword [save_buf + 4], 1
+    mov  [save_buf + 8], ebx
+
+    mov  eax, [light_angle]
+    mov  [save_buf + 12], eax
+
+    mov  eax, [cam_pos + 0]
+    mov  [save_buf + 16], eax
+    mov  eax, [cam_pos + 4]
+    mov  [save_buf + 20], eax
+    mov  eax, [cam_pos + 8]
+    mov  [save_buf + 24], eax
+
+    mov  eax, [cam_yaw]
+    mov  [save_buf + 28], eax
+    mov  eax, [cam_pitch]
+    mov  [save_buf + 32], eax
+
+    ; write
+    lea  rcx, [abs_save_path]
+    lea  rdx, [save_buf]
+    lea  r8,  [rbx + 36]
+    call file_write
+
+    add  rsp, 0x30
+    pop  rbx
+    ret
+
+; ============================================================
+; load_scene
+; ============================================================
+load_scene:
+    push rbx
+    sub  rsp, 0x30
+
+    lea  rcx, [rel_save_path]
+    lea  rdx, [abs_save_path]
+    mov  r8d, 260
+    call path_join_exe
+
+    lea  rcx, [abs_save_path]
+    call file_read
+    test rax, rax
+    jz   .fail
+    mov  rbx, rax
+
+    cmp  dword [rbx + 0], 0x45524433
+    jne  .free_fail
+
+    mov  eax, [rbx + 12]
+    mov  [light_angle], eax
+    mov  eax, [rbx + 16]
+    mov  [cam_pos + 0], eax
+    mov  eax, [rbx + 20]
+    mov  [cam_pos + 4], eax
+    mov  eax, [rbx + 24]
+    mov  [cam_pos + 8], eax
+    mov  eax, [rbx + 28]
+    mov  [cam_yaw], eax
+    mov  eax, [rbx + 32]
+    mov  [cam_pitch], eax
+
+    mov  eax, [rbx + 8]
+    xor  edx, edx
+    mov  ecx, 68
+    div  ecx
+    mov  edx, eax
+
+    lea  rcx, [rbx + 36]
+    call entity_load_from_buffer
+
+    mov  rcx, rbx
+    call file_free
+    mov  eax, 1
+    add  rsp, 0x30
+    pop  rbx
+    ret
+
+.free_fail:
+    mov  rcx, rbx
+    call file_free
+.fail:
+    xor  eax, eax
+    add  rsp, 0x30
+    pop  rbx
+    ret
+
+; ============================================================
 draw_crosshair:
     sub  rsp, 0x28
 
@@ -623,7 +738,6 @@ draw_crosshair:
 draw_skybox:
     sub  rsp, 0x28
 
-    ; build rotation-only view (drop translation)
     lea  rcx, [mat_view]
     call camera_get_view
 
@@ -639,21 +753,17 @@ draw_skybox:
     mov  dword [mat_view_no_t + 56], 0
     mov  dword [mat_view_no_t + 60], 0x3F800000
 
-    ; sky_vp = proj * view_no_translate
     lea  rcx, [mat_sky_vp]
     lea  rdx, [mat_proj]
     lea  r8,  [mat_view_no_t]
     call mat4_mul
 
-    ; ---- DISABLE depth test & depth write ----
     mov  ecx, GL_DEPTH_TEST
     call glDisable
 
-    ; ---- use skybox program ----
     lea  rcx, [skybox_prog]
     call shader_program_use
 
-    ; camera position
     call camera_get_pos
     movss xmm0, [rcx+0]
     movss [sky_cam_pos + 0], xmm0
@@ -662,7 +772,6 @@ draw_skybox:
     movss xmm0, [rcx+8]
     movss [sky_cam_pos + 8], xmm0
 
-    ; set uniforms
     lea  rcx, [skybox_prog]
     lea  rdx, [u_sky_vp_name]
     lea  r8,  [mat_sky_vp]
@@ -673,27 +782,24 @@ draw_skybox:
     lea  r8,  [sky_cam_pos]
     call shader_set_vec3
 
-    ; cull front faces (we're inside the cube)
     mov  ecx, GL_FRONT
     call glCullFace
 
     lea  rcx, [skybox_mesh]
     call mesh_draw
 
-    ; restore culling
     mov  ecx, GL_BACK
     call glCullFace
 
-    ; ---- RE-ENABLE depth test ----
     mov  ecx, GL_DEPTH_TEST
     call glEnable
 
-    ; back to main shader
     lea  rcx, [shader_prog]
     call shader_program_use
 
     add  rsp, 0x28
     ret
+
 ; ============================================================
 render_shadow_pass:
     push rbx
@@ -982,12 +1088,16 @@ WndProc:
 .deactivate:
     call  input_disable_mouse_look
     add  rsp, 0x28
-    xor   eax, eax
+    xor  eax, eax
     ret
 
 .keydown:
     cmp  r8d, VK_ESCAPE
     je   .esc
+    cmp  r8d, VK_F5
+    je   .key_f5
+    cmp  r8d, VK_F9
+    je   .key_f9
     mov  ecx, r8d
     mov  rdx, r9
     call input_on_key_down
@@ -1011,6 +1121,18 @@ WndProc:
     add  rsp, 0x28
     jmp  DefWindowProcA
 
+.key_f5:
+    call save_scene
+    add  rsp, 0x28
+    xor  eax, eax
+    ret
+
+.key_f9:
+    call load_scene
+    add  rsp, 0x28
+    xor  eax, eax
+    ret
+
 .esc:
     mov  rcx, [hwnd]
     call DestroyWindow
@@ -1024,7 +1146,6 @@ renderer_init:
     push r12
     sub  rsp, 0x28
 
-    ; ---- paths ----
     lea  rcx, [rel_vs_path]
     lea  rdx, [abs_vs_path]
     mov  r8d, 260
@@ -1055,7 +1176,7 @@ renderer_init:
     mov  r8d, 260
     call path_join_exe
 
-    ; ---- main program ----
+    ; main program
     lea  rcx, [shader_prog]
     lea  rdx, [abs_vs_path]
     lea  r8,  [abs_fs_path]
@@ -1068,19 +1189,16 @@ renderer_init:
     call set_static_uniforms
 
 .no_shader:
-    ; ---- shadow program ----
     lea  rcx, [shadow_prog]
     lea  rdx, [abs_shadow_vs]
     lea  r8,  [abs_shadow_fs]
     call shader_program_init
 
-    ; ---- skybox program ----
     lea  rcx, [skybox_prog]
     lea  rdx, [abs_sky_vs]
     lea  r8,  [abs_sky_fs]
     call shader_program_init
 
-    ; ---- meshes ----
     lea  rcx, [cube_mesh]
     call mesh_create_cube
     lea  rcx, [sphere_mesh]
@@ -1094,7 +1212,6 @@ renderer_init:
     lea  rcx, [skybox_mesh]
     call mesh_create_skybox
 
-    ; ---- textures ----
     lea  rcx, [rel_png_a]
     lea  rdx, [abs_png_a]
     mov  r8d, 260
@@ -1115,21 +1232,17 @@ renderer_init:
     mov  r8d, 4
     call texture_create_checkerboard
 
-    ; ---- normal map ----
     lea  rcx, [tex_normal]
     mov  edx, 128
     call texture_create_normal_bumps
 
-    ; ---- shadow framebuffer ----
     lea  rcx, [shadow_fb]
     mov  edx, SHADOW_W
     mov  r8d, SHADOW_H
     call framebuffer_create_shadow
 
-    ; ---- light matrices ----
     call compute_light_view_proj
 
-    ; ---- entities ----
     call entity_init
     xorps xmm0, xmm0
     movss [light_angle], xmm0
@@ -1200,14 +1313,8 @@ renderer_draw:
     push r12
     sub  rsp, 0x28
 
-    ; =========================================================
-    ; PASS 1: shadow map
-    ; =========================================================
     call render_shadow_pass
 
-    ; =========================================================
-    ; PASS 2: main
-    ; =========================================================
     xor  ecx, ecx
     xor  edx, edx
     mov  r8d, 800
@@ -1248,7 +1355,6 @@ renderer_draw:
     mov  ecx, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
     call glClear
 
-    ; ---- camera matrices (needed by skybox) ----
     lea  rcx, [mat_proj]
     call camera_get_proj
 
@@ -1260,10 +1366,8 @@ renderer_draw:
     lea  r8,  [mat_view]
     call mat4_mul
 
-    ; ---- skybox first (behind everything) ----
     call draw_skybox
 
-    ; ---- bind shadow map on unit 1 ----
     mov  eax, [shadow_fb + FB_DEPTH_TEX]
     mov  [rsp+0x10], eax
     mov  dword [rsp+0x14], 0
@@ -1273,7 +1377,6 @@ renderer_draw:
     mov  edx, 0x84C1
     call texture_bind
 
-    ; ---- bind normal map on unit 2 ----
     mov  eax, [tex_normal + TEX_ID]
     mov  [rsp+0x10], eax
     mov  dword [rsp+0x14], 0
@@ -1283,7 +1386,6 @@ renderer_draw:
     mov  edx, 0x84C2
     call texture_bind
 
-    ; ---- camera pos + lights uniforms ----
     call camera_get_pos
     mov  r8, rcx
     lea  rcx, [shader_prog]
@@ -1299,7 +1401,7 @@ renderer_draw:
     lea  r8,  [lightB_pos]
     call shader_set_vec3
 
-    ; ---- ground ----
+    ; ground
     lea  rcx, [mat_tmp]
     xorps xmm0, xmm0
     movss xmm1, [ground_pos_y]
@@ -1359,7 +1461,7 @@ renderer_draw:
     lea  rcx, [cube_mesh]
     call mesh_draw
 
-    ; ---- entities ----
+    ; entities
     lea  rbx, [entities]
     mov  r12d, MAX_ENTITIES
 

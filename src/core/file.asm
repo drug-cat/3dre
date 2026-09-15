@@ -7,6 +7,7 @@ default rel
 
 extern CreateFileA
 extern ReadFile
+extern WriteFile
 extern GetFileSizeEx
 extern CloseHandle
 extern GetFileAttributesExA
@@ -16,6 +17,7 @@ extern LocalFree
 
 section .text
 global file_read
+global file_write
 global file_free
 global file_write_time
 global file_get_exe_dir
@@ -33,21 +35,18 @@ file_read:
     push r12
     sub  rsp, 0x48
 
-    ; --- zero locals ---
-    mov  qword [rsp+0x38], 0       ; file_size
-    mov  dword [rsp+0x40], 0       ; bytesRead
+    mov  qword [rsp+0x38], 0
+    mov  dword [rsp+0x40], 0
 
     mov  rbx, rcx
 
-    ; --- CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
-    ;                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL) ---
     mov  rcx, rbx
     mov  edx, 0x80000000
     mov  r8d, 1
     xor  r9d, r9d
-    mov  qword [rsp+0x20], 3       ; dwCreationDisposition = OPEN_EXISTING
-    mov  qword [rsp+0x28], 0x80    ; dwFlagsAndAttributes = NORMAL
-    mov  qword [rsp+0x30], 0       ; hTemplateFile
+    mov  qword [rsp+0x20], 3
+    mov  qword [rsp+0x28], 0x80
+    mov  qword [rsp+0x30], 0
     call CreateFileA
     cmp  rax, -1
     je   .fail
@@ -55,7 +54,6 @@ file_read:
     jz   .fail
     mov  r12, rax
 
-    ; --- GetFileSizeEx(handle, &file_size) ---
     mov  rcx, r12
     lea  rdx, [rsp+0x38]
     call GetFileSizeEx
@@ -63,7 +61,6 @@ file_read:
     jz   .fail_close
     mov  rdi, [rsp+0x38]
 
-    ; --- Clamp: at least 1 byte, at most 16 MB ---
     cmp  rdi, 1
     jae  .size_min_ok
     mov  rdi, 1
@@ -71,25 +68,22 @@ file_read:
     cmp  rdi, 0x1000000
     ja   .fail_close
 
-    ; --- LocalAlloc(LMEM_FIXED, size + 1) ---
-    xor  ecx, ecx                  ; LMEM_FIXED = 0
+    xor  ecx, ecx
     lea  rdx, [rdi+1]
     call LocalAlloc
     test rax, rax
     jz   .fail_close
     mov  rsi, rax
 
-    ; --- ReadFile(handle, buf, size, &bytesRead, NULL) ---
     mov  rcx, r12
     mov  rdx, rsi
     mov  r8,  rdi
     lea  r9,  [rsp+0x40]
-    mov  qword [rsp+0x20], 0       ; lpOverlapped
+    mov  qword [rsp+0x20], 0
     call ReadFile
     test eax, eax
     jz   .fail_free
 
-    ; --- Null-terminate (32-bit read, zero-extended, clamped) ---
     mov  eax, [rsp+0x40]
     cmp  eax, edi
     jbe  .term_ok
@@ -97,7 +91,6 @@ file_read:
 .term_ok:
     mov  byte [rsi+rax], 0
 
-    ; --- Close & return ---
     mov  rcx, r12
     call CloseHandle
 
@@ -125,7 +118,63 @@ file_read:
     ret
 
 ; ============================================================
-; file_free(void* ptr) — safe on NULL
+; file_write(const char* path, const void* data, u32 size) → eax = 1/0
+;   rcx = path, rdx = data, r8d = size
+; ============================================================
+file_write:
+    push rbx
+    push rsi
+    push rdi
+    sub  rsp, 0x48
+
+    mov  rbx, rcx                  ; path
+    mov  rsi, rdx                  ; data
+    mov  edi, r8d                  ; size
+
+    mov  rcx, rbx
+    mov  edx, 0x40000000           ; GENERIC_WRITE
+    xor  r8d, r8d
+    xor  r9d, r9d
+    mov  qword [rsp+0x20], 2       ; CREATE_ALWAYS
+    mov  qword [rsp+0x28], 0x80    ; FILE_ATTRIBUTE_NORMAL
+    mov  qword [rsp+0x30], 0
+    call CreateFileA
+    cmp  rax, -1
+    je   .fail
+    test rax, rax
+    jz   .fail
+    mov  rbx, rax                  ; hFile
+
+    mov  rcx, rbx
+    mov  rdx, rsi
+    mov  r8d, edi
+    lea  r9,  [rsp+0x38]
+    mov  qword [rsp+0x20], 0
+    call WriteFile
+    test eax, eax
+    jz   .fail_close
+
+    mov  rcx, rbx
+    call CloseHandle
+
+    mov  eax, 1
+    add  rsp, 0x48
+    pop  rdi
+    pop  rsi
+    pop  rbx
+    ret
+
+.fail_close:
+    mov  rcx, rbx
+    call CloseHandle
+.fail:
+    xor  eax, eax
+    add  rsp, 0x48
+    pop  rdi
+    pop  rsi
+    pop  rbx
+    ret
+
 ; ============================================================
 file_free:
     test rcx, rcx
@@ -135,16 +184,14 @@ file_free:
     ret
 
 ; ============================================================
-; file_write_time(const char* path) → rax = FILETIME packed, 0 on fail
-; ============================================================
 file_write_time:
     sub  rsp, 0x58
-    mov  rdx, 0                    ; GetFileExInfoStandard
+    mov  rdx, 0
     lea  r8,  [rsp+0x20]
     call GetFileAttributesExA
     test eax, eax
     jz   .fail
-    mov  rax, [rsp+0x20+20]        ; ftLastWriteTime
+    mov  rax, [rsp+0x20+20]
     add  rsp, 0x58
     ret
 .fail:
@@ -152,8 +199,6 @@ file_write_time:
     add  rsp, 0x58
     ret
 
-; ============================================================
-; file_get_exe_dir(char* out, u32 out_size) → rax = length incl. backslash
 ; ============================================================
 file_get_exe_dir:
     push rbx
@@ -170,7 +215,6 @@ file_get_exe_dir:
     test eax, eax
     jz   .fail
 
-    ; Scan backward for '\'
     mov  rdx, rbx
     mov  ecx, eax
     add  rdx, rcx
@@ -181,10 +225,10 @@ file_get_exe_dir:
     cmp  byte [rdx], 92
     jne  .find
 
-    mov  byte [rdx+1], 0           ; terminate right after backslash
+    mov  byte [rdx+1], 0
     mov  rax, rdx
     sub  rax, rbx
-    inc  rax                       ; include the backslash
+    inc  rax
 
     add  rsp, 0x28
     pop  rsi
@@ -198,17 +242,15 @@ file_get_exe_dir:
     ret
 
 ; ============================================================
-; path_join_exe(const char* relative, char* out, u32 out_size) → eax = 1/0
-; ============================================================
 path_join_exe:
     push rbx
     push rsi
     push rdi
     sub  rsp, 0x20
 
-    mov  rbx, rcx                  ; relative
-    mov  rsi, rdx                  ; out
-    mov  edi, r8d                  ; out_size
+    mov  rbx, rcx
+    mov  rsi, rdx
+    mov  edi, r8d
 
     mov  rcx, rsi
     mov  edx, edi
@@ -216,7 +258,6 @@ path_join_exe:
     test rax, rax
     jz   .fail
 
-    ; find end of out (already contains exe dir with trailing '\')
     mov  rcx, rsi
 .scan:
     cmp  byte [rcx], 0
@@ -249,8 +290,6 @@ path_join_exe:
     ret
 
 ; ============================================================
-; str_dup(const char* s) → rax = heap copy (or 0)
-; ============================================================
 str_dup:
     push rbx
     push rsi
@@ -268,7 +307,7 @@ str_dup:
     sub  rax, rbx
     mov  rdi, rax
 
-    xor  ecx, ecx                  ; LMEM_FIXED
+    xor  ecx, ecx
     lea  rdx, [rdi+1]
     call LocalAlloc
     test rax, rax
@@ -301,5 +340,5 @@ str_dup:
     ret
 
 ; ============================================================
-str_free:                          ; rcx = string
+str_free:
     jmp  file_free

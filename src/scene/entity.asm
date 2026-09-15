@@ -1,9 +1,6 @@
 ; ============================================================
 ; src/scene/entity.asm
-; Entities + physics + rolling spheres + unstable stacking
-; Collision:
-;   - any pair with a sphere  → sphere-sphere (+ tilt fix)
-;   - both non-sphere (box)   → AABB along min-overlap axis
+; Entity slots + physics + collisions + scene serialization
 ; ============================================================
 BITS 64
 default rel
@@ -38,6 +35,8 @@ global entity_spawn_pyramid
 global entity_destroy
 global entity_destroy_last
 global entity_update_all
+global entity_save_to_buffer
+global entity_load_from_buffer
 
 ; ============================================================
 entity_init:
@@ -62,8 +61,6 @@ entity_spawn_pyramid:
     mov  ecx, E_TYPE_PYRAMID
     jmp  entity_spawn_internal
 
-; ============================================================
-; entity_spawn_internal
 ; ============================================================
 entity_spawn_internal:
     push rbx
@@ -183,7 +180,7 @@ entity_destroy_last:
     ret
 
 ; ============================================================
-; entity_update_all(dt)
+; entity_update_all(dt)  ; xmm0 = dt
 ; ============================================================
 entity_update_all:
     push rbx
@@ -313,7 +310,6 @@ entity_update_all:
 
 ; ============================================================
 ; entity_resolve_collisions
-;   Pair dispatch: sphere involved → sphere path, else → box path
 ; ============================================================
 entity_resolve_collisions:
     push rbp
@@ -322,13 +318,6 @@ entity_resolve_collisions:
     push r14
     push r15
     sub  rsp, 0x40
-
-    ; stack layout:
-    ;   [rsp+0x00..0x08] : normal (nx, ny, nz)  (also deltas at start)
-    ;   [rsp+0x0C]       : dist (sphere)
-    ;   [rsp+0x10]       : half_penetration
-    ;   [rsp+0x14]       : inv_len scratch (tilt renormalize)
-    ;   [rsp+0x18]       : spare
 
     movups xmm15, [abs_mask]
 
@@ -351,16 +340,15 @@ entity_resolve_collisions:
     cmp  dword [r15 + E_TYPE], E_TYPE_EMPTY
     je   .inner_next
 
-    ; ---- dispatch: sphere involved → sphere path ----
+    ; ---- dispatch: sphere involved → sphere path, else box path ----
     cmp  dword [r14 + E_TYPE], E_TYPE_SPHERE
     je   .sphere_path
     cmp  dword [r15 + E_TYPE], E_TYPE_SPHERE
     je   .sphere_path
 
-; ============================================================
-; BOX-BOX path — AABB along min-overlap axis
-; ============================================================
-    ; d = posB - posA → rsp+0x00..0x08
+    ; ============================================
+    ; BOX-BOX path (AABB)
+    ; ============================================
     movss xmm0, [r15 + E_POS + 0]
     subss xmm0, [r14 + E_POS + 0]
     movss [rsp+0x00], xmm0
@@ -373,11 +361,9 @@ entity_resolve_collisions:
     subss xmm2, [r14 + E_POS + 8]
     movss [rsp+0x08], xmm2
 
-    ; rsum = halfA + halfB
     movss xmm3, [r14 + E_HALF_H]
     addss xmm3, [r15 + E_HALF_H]
 
-    ; ovX = rsum - |dx|
     movaps xmm4, xmm0
     andps  xmm4, xmm15
     movaps xmm5, xmm3
@@ -386,7 +372,6 @@ entity_resolve_collisions:
     comiss xmm5, xmm6
     jbe  .inner_next
 
-    ; ovY
     movaps xmm4, xmm1
     andps  xmm4, xmm15
     movaps xmm7, xmm3
@@ -394,7 +379,6 @@ entity_resolve_collisions:
     comiss xmm7, xmm6
     jbe  .inner_next
 
-    ; ovZ
     movaps xmm4, xmm2
     andps  xmm4, xmm15
     movaps xmm8, xmm3
@@ -402,9 +386,8 @@ entity_resolve_collisions:
     comiss xmm8, xmm6
     jbe  .inner_next
 
-    ; find axis of minimum overlap
-    movaps xmm9, xmm5               ; candidate = ovX
-    xor  eax, eax                   ; axis = 0
+    movaps xmm9, xmm5
+    xor  eax, eax
     comiss xmm9, xmm7
     jbe  .box_chk_z
     movaps xmm9, xmm7
@@ -415,19 +398,17 @@ entity_resolve_collisions:
     movaps xmm9, xmm8
     mov  eax, 2
 .box_axis_ready:
-    ; half_pen = min_ov * 0.5
     mulss xmm9, [f_half]
     movss [rsp+0x10], xmm9
 
-    ; normal: sign along chosen axis from delta
-    mov  r10d, 0x3F800000           ; +1.0f
-    mov  r11d, 0xBF800000           ; -1.0f
+    mov  r10d, 0x3F800000
+    mov  r11d, 0xBF800000
 
     cmp  eax, 0
     je   .box_axis_x
     cmp  eax, 1
     je   .box_axis_y
-    ; --- Z ---
+
     xorps xmm10, xmm10
     movss [rsp+0x00], xmm10
     movss [rsp+0x04], xmm10
@@ -475,9 +456,9 @@ entity_resolve_collisions:
     movss [rsp+0x04], xmm10
     jmp  .apply_impulse
 
-; ============================================================
-; SPHERE path (unchanged from before)
-; ============================================================
+    ; ============================================
+    ; SPHERE path (sphere-sphere)
+    ; ============================================
 .sphere_path:
     movss xmm0, [r15 + E_POS + 0]
     subss xmm0, [r14 + E_POS + 0]
@@ -527,7 +508,7 @@ entity_resolve_collisions:
     mulss xmm7, xmm6
     movss [rsp+0x08], xmm7
 
-    ; tilt fix for stacked spheres
+    ; unstable-stack tilt for two spheres with near-vertical normal
     cmp  dword [r14 + E_TYPE], E_TYPE_SPHERE
     jne  .no_tilt
     cmp  dword [r15 + E_TYPE], E_TYPE_SPHERE
@@ -560,7 +541,6 @@ entity_resolve_collisions:
     sqrtss xmm9, xmm9
     movss  xmm10, [f_one]
     divss  xmm10, xmm9
-    movss  [rsp+0x14], xmm10
 
     movss xmm8, [rsp+0x00]
     mulss xmm8, xmm10
@@ -573,7 +553,6 @@ entity_resolve_collisions:
     movss [rsp+0x08], xmm8
 
 .no_tilt:
-    ; half_pen = (rA + rB - dist) * 0.5
     movss xmm7, [r14 + E_HALF_H]
     addss xmm7, [r15 + E_HALF_H]
     subss xmm7, xmm5
@@ -581,11 +560,9 @@ entity_resolve_collisions:
     movss [rsp+0x10], xmm7
 
 ; ============================================================
-; APPLY IMPULSE + PUSH APART  (shared by both paths)
-;   normal at rsp+0x00..0x08, half_pen at rsp+0x10
+; APPLY IMPULSE (shared)
 ; ============================================================
 .apply_impulse:
-    ; ei.pos -= n * hp
     movss xmm7, [rsp+0x00]
     mulss xmm7, [rsp+0x10]
     movss xmm8, [r14 + E_POS + 0]
@@ -604,7 +581,6 @@ entity_resolve_collisions:
     subss xmm8, xmm7
     movss [r14 + E_POS + 8], xmm8
 
-    ; ej.pos += n * hp
     movss xmm7, [rsp+0x00]
     mulss xmm7, [rsp+0x10]
     movss xmm8, [r15 + E_POS + 0]
@@ -623,7 +599,6 @@ entity_resolve_collisions:
     addss xmm8, xmm7
     movss [r15 + E_POS + 8], xmm8
 
-    ; v_rel · n
     movss xmm0, [r15 + E_VEL + 0]
     subss xmm0, [r14 + E_VEL + 0]
     movss xmm1, [r15 + E_VEL + 4]
@@ -643,7 +618,6 @@ entity_resolve_collisions:
 
     mulss xmm0, [f_neg_three_q]
 
-    ; ei.vel -= n * J
     movss xmm7, [rsp+0x00]
     mulss xmm7, xmm0
     movss xmm8, [r14 + E_VEL + 0]
@@ -662,7 +636,6 @@ entity_resolve_collisions:
     subss xmm8, xmm7
     movss [r14 + E_VEL + 8], xmm8
 
-    ; ej.vel += n * J
     movss xmm7, [rsp+0x00]
     mulss xmm7, xmm0
     movss xmm8, [r15 + E_VEL + 0]
@@ -698,4 +671,178 @@ entity_resolve_collisions:
     pop  r13
     pop  r12
     pop  rbp
+    ret
+
+; ============================================================
+; entity_save_to_buffer(u8* buf) → rax = bytes written
+;   Each entity → 68-byte record.
+; ============================================================
+entity_save_to_buffer:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    sub  rsp, 0x20
+
+    mov  rdi, rcx
+    lea  rbx, [entities]
+    mov  r12d, MAX_ENTITIES
+    xor  rsi, rsi
+
+.loop:
+    cmp  dword [rbx + E_TYPE], E_TYPE_EMPTY
+    je   .skip
+
+    mov  eax, [rbx + E_TYPE]
+    mov  [rdi + 0], eax
+    mov  eax, [rbx + E_TEXTURE]
+    mov  [rdi + 4], eax
+
+    mov  eax, [rbx + E_POS + 0]
+    mov  [rdi + 8], eax
+    mov  eax, [rbx + E_POS + 4]
+    mov  [rdi + 12], eax
+    mov  eax, [rbx + E_POS + 8]
+    mov  [rdi + 16], eax
+
+    mov  eax, [rbx + E_ROT_X]
+    mov  [rdi + 20], eax
+    mov  eax, [rbx + E_ROT_Y]
+    mov  [rdi + 24], eax
+    mov  eax, [rbx + E_ROT_Z]
+    mov  [rdi + 28], eax
+
+    mov  eax, [rbx + E_ROT_SPEED]
+    mov  [rdi + 32], eax
+
+    mov  eax, [rbx + E_VEL + 0]
+    mov  [rdi + 36], eax
+    mov  eax, [rbx + E_VEL + 4]
+    mov  [rdi + 40], eax
+    mov  eax, [rbx + E_VEL + 8]
+    mov  [rdi + 44], eax
+
+    mov  eax, [rbx + E_COLOR + 0]
+    mov  [rdi + 48], eax
+    mov  eax, [rbx + E_COLOR + 4]
+    mov  [rdi + 52], eax
+    mov  eax, [rbx + E_COLOR + 8]
+    mov  [rdi + 56], eax
+
+    mov  eax, [rbx + E_SCALE]
+    mov  [rdi + 60], eax
+
+    mov  eax, [rbx + E_HALF_H]
+    mov  [rdi + 64], eax
+
+    add  rdi, 68
+    add  rsi, 68
+
+.skip:
+    add  rbx, ENTITY_SIZE
+    dec  r12d
+    jnz  .loop
+
+    mov  rax, rsi
+    add  rsp, 0x20
+    pop  r12
+    pop  rdi
+    pop  rsi
+    pop  rbx
+    ret
+
+; ============================================================
+; entity_load_from_buffer(u8* buf, u32 count)
+; ============================================================
+entity_load_from_buffer:
+    push rbx
+    push rsi
+    push rdi
+    push r12
+    sub  rsp, 0x20
+
+    mov  rdi, rcx
+    mov  r12d, edx
+
+    call entity_init
+
+    xor  esi, esi
+
+.load_loop:
+    cmp  esi, r12d
+    jae  .done
+
+    lea  rax, [entities]
+    mov  ecx, MAX_ENTITIES
+.find:
+    cmp  dword [rax + E_TYPE], E_TYPE_EMPTY
+    je   .found
+    add  rax, ENTITY_SIZE
+    dec  ecx
+    jnz  .find
+    jmp  .done
+
+.found:
+    mov  rbx, rax
+
+    ; zero struct
+    pxor xmm0, xmm0
+    movdqu [rbx +  0], xmm0
+    movdqu [rbx + 16], xmm0
+    movdqu [rbx + 32], xmm0
+    movdqu [rbx + 48], xmm0
+    movdqu [rbx + 64], xmm0
+
+    mov  eax, [rdi + 0]
+    mov  [rbx + E_TYPE], eax
+    mov  eax, [rdi + 4]
+    mov  [rbx + E_TEXTURE], eax
+
+    mov  eax, [rdi + 8]
+    mov  [rbx + E_POS + 0], eax
+    mov  eax, [rdi + 12]
+    mov  [rbx + E_POS + 4], eax
+    mov  eax, [rdi + 16]
+    mov  [rbx + E_POS + 8], eax
+
+    mov  eax, [rdi + 20]
+    mov  [rbx + E_ROT_X], eax
+    mov  eax, [rdi + 24]
+    mov  [rbx + E_ROT_Y], eax
+    mov  eax, [rdi + 28]
+    mov  [rbx + E_ROT_Z], eax
+
+    mov  eax, [rdi + 32]
+    mov  [rbx + E_ROT_SPEED], eax
+
+    mov  eax, [rdi + 36]
+    mov  [rbx + E_VEL + 0], eax
+    mov  eax, [rdi + 40]
+    mov  [rbx + E_VEL + 4], eax
+    mov  eax, [rdi + 44]
+    mov  [rbx + E_VEL + 8], eax
+
+    mov  eax, [rdi + 48]
+    mov  [rbx + E_COLOR + 0], eax
+    mov  eax, [rdi + 52]
+    mov  [rbx + E_COLOR + 4], eax
+    mov  eax, [rdi + 56]
+    mov  [rbx + E_COLOR + 8], eax
+
+    mov  eax, [rdi + 60]
+    mov  [rbx + E_SCALE], eax
+
+    mov  eax, [rdi + 64]
+    mov  [rbx + E_HALF_H], eax
+
+    add  rdi, 68
+    inc  esi
+    jmp  .load_loop
+
+.done:
+    add  rsp, 0x20
+    pop  r12
+    pop  rdi
+    pop  rsi
+    pop  rbx
     ret
