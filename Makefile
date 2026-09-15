@@ -13,7 +13,7 @@ TARGET   := $(BLD_DIR)/engine.exe
 
 ASMFLAGS := -f win64 -g -F cv8 -I $(INC_DIR)/
 LDFLAGS  := -m64 -mwindows
-LIBS     := -lopengl32 -lgdi32 -luser32 -lkernel32 -lole32
+LIBS     := -lopengl32 -lgdi32 -luser32 -lkernel32 -lole32 -lgdiplus
 
 SOURCES  := $(shell find $(SRC_DIR) -name '*.asm')
 OBJECTS  := $(patsubst $(SRC_DIR)/%.asm,$(OBJ_DIR)/%.o,$(SOURCES))

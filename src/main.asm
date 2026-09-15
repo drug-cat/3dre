@@ -1,6 +1,7 @@
 ; ============================================================
 ; src/main.asm
-; Entities: cubes, spheres, pyramids with PNG + checkerboard textures
+; Entities: cubes, spheres, pyramids with PNG + checkerboard
+; Uses GDI+ for image loading
 ; ============================================================
 BITS 64
 default rel
@@ -14,18 +15,14 @@ default rel
 %include "texture.inc"
 %include "entity.inc"
 
-; ---- GL 3.3 pointers ----
 extern glBindVertexArray
 extern glDrawElements
-
-; ---- GL 1.1 direct ----
 extern glClear
 extern glClearColor
 extern glEnable
 extern glCullFace
 extern glFrontFace
 
-; ---- Engine ----
 extern win32_register_class
 extern win32_create_window
 extern win32_create_gl_context
@@ -84,7 +81,10 @@ extern entities
 extern time_init
 extern time_dt
 
-; ---- Win32 ----
+; ---- Image loader (GDI+) ----
+extern image_init
+extern image_shutdown
+
 extern GetModuleHandleA
 extern ShowWindow
 extern UpdateWindow
@@ -118,11 +118,9 @@ u_camera_pos_name db "uCameraPos",0
 u_spec_col_name   db "uSpecularColor",0
 u_shininess_name  db "uShininess",0
 
-dbg_title       db "3dre",0
-dbg_png_fail    db "PNG load failed - using checkerboard fallback.",0
+dbg_title       db "3dre Debug",0
 dbg_shader_fail db "Shader failed to load.",0
 
-; ---- Light settings ----
 align 16
 light_dir        dd 0.4, 0.7, 0.5
 light_color      dd 1.0, 1.0, 1.0
@@ -131,25 +129,16 @@ spec_color       dd 1.0, 1.0, 1.0
 shininess        dd 64.0
 
 ; ---- Spawn table (36 bytes per entry) ----
-;   +0  u32  type
-;   +4  u32  texture_slot  (0 = PNG, 1 = checkerboard)
-;   +8  f32  x
-;   +12 f32  y
-;   +16 f32  z
-;   +20 f32  rot_speed
-;   +24 f32  color_r
-;   +28 f32  color_g
-;   +32 f32  color_b
 align 16
 spawn_list:
     dd E_TYPE_CUBE,    0,   -3.0,  1.5, -1.0,   0.8,   1.0, 1.0, 1.0
-    dd E_TYPE_CUBE,    1,    3.0,  1.5, -1.0,   0.6,   0.3, 1.0, 0.3
+    dd E_TYPE_CUBE,    0,    3.0,  1.5, -1.0,   0.6,   1.0, 1.0, 1.0
     dd E_TYPE_PYRAMID, 0,   -3.0, -1.5,  1.0,   0.7,   1.0, 1.0, 1.0
-    dd E_TYPE_PYRAMID, 1,    3.0, -1.5,  1.0,   0.5,   1.0, 1.0, 0.3
+    dd E_TYPE_PYRAMID, 0,    3.0, -1.5,  1.0,   0.5,   1.0, 1.0, 1.0
     dd E_TYPE_SPHERE,  0,   -4.0,  0.0,  0.0,   0.9,   1.0, 1.0, 1.0
-    dd E_TYPE_SPHERE,  1,    0.0,  2.5,  0.0,   1.2,   0.9, 0.9, 0.95
+    dd E_TYPE_SPHERE,  0,    0.0,  2.5,  0.0,   1.2,   1.0, 1.0, 1.0
     dd E_TYPE_SPHERE,  0,    4.0,  0.0,  0.0,   0.9,   1.0, 1.0, 1.0
-    dd E_TYPE_SPHERE,  1,    0.0, -2.5,  0.0,   1.2,   0.5, 0.7, 1.0
+    dd E_TYPE_SPHERE,  0,    0.0, -2.5,  0.0,   1.2,   1.0, 1.0, 1.0
 
 NUM_SPAWNS equ 8
 SPAWN_SIZE equ 36
@@ -194,7 +183,6 @@ section .text
 set_light_uniforms:
     sub  rsp, 0x28
 
-    ; guard: no shader loaded yet
     mov  eax, [shader_prog + SP_ID]
     test eax, eax
     jz   .done
@@ -224,7 +212,6 @@ set_light_uniforms:
     movss xmm2, [shininess]
     call shader_set_float
 
-    ; uAlbedo sampler = 0
     mov  ecx, [shader_prog + SP_ID]
     lea  rdx, [u_albedo_name]
     call qword [glGetUniformLocation]
@@ -284,6 +271,7 @@ WinMain:
 
     call input_init
     call time_init
+    call image_init                ; initialize GDI+
     call renderer_init
 
     lea  rax, [shader_prog]
@@ -332,6 +320,7 @@ WinMain:
     jmp  .loop
 
 .exit:
+    call image_shutdown            ; shut down GDI+
     lea  rcx, [tex_slot1]
     call texture_destroy
     lea  rcx, [tex_slot0]
@@ -442,7 +431,7 @@ renderer_init:
     push r12
     sub  rsp, 0x28
 
-    ; ---- Shader paths + program ----
+    ; ---- Shader ----
     lea  rcx, [rel_vs_path]
     lea  rdx, [abs_vs_path]
     mov  r8d, 260
@@ -477,7 +466,7 @@ renderer_init:
     lea  rcx, [pyramid_mesh]
     call mesh_create_pyramid
 
-    ; ---- Texture slot 0: try PNG, fall back to checkerboard ----
+    ; ---- Texture slot 0: PNG first, fallback to checkerboard ----
     lea  rcx, [rel_png_a]
     lea  rdx, [abs_png_a]
     mov  r8d, 260
@@ -489,14 +478,14 @@ renderer_init:
     test eax, eax
     jnz  .png_ok
 
-    ; fallback: fine checkerboard
+    ; fallback to fine checkerboard
     lea  rcx, [tex_slot0]
     mov  edx, 16
     mov  r8d, 8
     call texture_create_checkerboard
 
 .png_ok:
-    ; ---- Texture slot 1: chunkier checkerboard ----
+    ; ---- Texture slot 1: chunky checkerboard ----
     lea  rcx, [tex_slot1]
     mov  edx, 32
     mov  r8d, 4
@@ -509,9 +498,8 @@ renderer_init:
     mov  r12d, NUM_SPAWNS
 
 .spawn_loop:
-    mov  eax, [rbx + 0]                ; type
+    mov  eax, [rbx + 0]
 
-    ; resolve texture slot → GL id
     mov  ecx, [rbx + 4]
     test ecx, ecx
     jnz  .use_slot1
@@ -603,14 +591,12 @@ renderer_draw:
     mov  ecx, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT
     call glClear
 
-    ; camera position uniform
     call camera_get_pos
     mov  r8, rcx
     lea  rcx, [shader_prog]
     lea  rdx, [u_camera_pos_name]
     call shader_set_vec3
 
-    ; proj / view / pv = proj * view
     lea  rcx, [mat_proj]
     call camera_get_proj
 
@@ -622,7 +608,6 @@ renderer_draw:
     lea  r8,  [mat_view]
     call mat4_mul
 
-    ; ---- Iterate entity slots ----
     lea  rbx, [entities]
     mov  r12d, MAX_ENTITIES
 
@@ -630,7 +615,6 @@ renderer_draw:
     cmp  dword [rbx + E_TYPE], E_TYPE_EMPTY
     je   .entity_next
 
-    ; model = T * R
     lea  rcx, [mat_tmp]
     movss xmm0, [rbx + E_POS + 0]
     movss xmm1, [rbx + E_POS + 4]
@@ -646,15 +630,11 @@ renderer_draw:
     lea  r8,  [mat_tmp2]
     call mat4_mul
 
-    ; mvp = pv * model
     lea  rcx, [mat_mvp]
     lea  rdx, [mat_pv]
     lea  r8,  [mat_model]
     call mat4_mul
 
-    ; ---- Bind entity texture on unit 0 ----
-    ; E_TEXTURE holds a GL texture id directly. Wrap it in a temporary
-    ; Texture-like struct on stack so texture_bind can read it.
     mov  eax, [rbx + E_TEXTURE]
     test eax, eax
     jz   .no_tex
@@ -667,7 +647,6 @@ renderer_draw:
     call texture_bind
 .no_tex:
 
-    ; ---- Set uniforms ----
     lea  rcx, [shader_prog]
     lea  rdx, [u_mvp_name]
     lea  r8,  [mat_mvp]
@@ -683,7 +662,6 @@ renderer_draw:
     lea  r8,  [rbx + E_COLOR]
     call shader_set_vec3
 
-    ; ---- Dispatch draw by type ----
     mov  eax, [rbx + E_TYPE]
     cmp  eax, E_TYPE_CUBE
     je   .draw_cube
